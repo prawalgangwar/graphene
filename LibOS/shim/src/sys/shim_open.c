@@ -1,18 +1,5 @@
-/* Copyright (C) 2014 Stony Brook University
-   This file is part of Graphene Library OS.
-
-   Graphene Library OS is free software: you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public License
-   as published by the Free Software Foundation, either version 3 of the
-   License, or (at your option) any later version.
-
-   Graphene Library OS is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
+/* Copyright (C) 2014 Stony Brook University */
 
 /*
  * shim_open.c
@@ -28,7 +15,6 @@
 #include <shim_thread.h>
 #include <shim_handle.h>
 #include <shim_fs.h>
-#include <shim_profile.h>
 
 #include <pal.h>
 #include <pal_error.h>
@@ -115,6 +101,14 @@ int shim_do_open (const char * file, int flags, mode_t mode)
     if (file[0] == '\0')
         return -EINVAL;
 
+    if (!(flags & O_CREAT)) {
+        /* `mode` should be ignored if O_CREAT is not specified, according to man */
+        mode = 0;
+    } else {
+        /* This isn't documented, but that's what Linux does. */
+        mode &= 07777;
+    }
+
     struct shim_handle * hdl = get_new_handle();
     if (!hdl)
         return -ENOMEM;
@@ -139,6 +133,14 @@ int shim_do_openat (int dfd, const char * filename, int flags, int mode)
 {
     if (!filename || test_user_string(filename))
         return -EFAULT;
+
+    if (!(flags & O_CREAT)) {
+        /* `mode` should be ignored if O_CREAT is not specified, according to man */
+        mode = 0;
+    } else {
+        /* This isn't documented, but that's what Linux does. */
+        mode &= 07777;
+    }
 
     struct shim_dentry * dir = NULL;
     int ret = 0;

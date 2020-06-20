@@ -2,6 +2,7 @@ loader.preload = file:../../src/libsysdb.so
 loader.env.LD_LIBRARY_PATH = /lib
 loader.debug_type = none
 loader.syscall_symbol = syscalldb
+loader.argv0_override = multi_pthread
 
 fs.mount.lib.type = chroot
 fs.mount.lib.path = /lib
@@ -13,3 +14,6 @@ sgx.trusted_files.libpthread = file:../../../../Runtime/libpthread.so.0
 
 # app runs with 4 parallel threads + Graphene has couple internal threads
 sgx.thread_num = 8
+
+sgx.static_address = 1
+sgx.print_stats = 1

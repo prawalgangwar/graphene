@@ -6,10 +6,18 @@
 #include "pal.h"
 #include "pal_debug.h"
 
-void handler1 (PAL_PTR event, PAL_NUM arg, PAL_CONTEXT * context)
+static void* get_stack(void) {
+    void* stack;
+    __asm__ volatile("mov %%rsp, %0" : "=r"(stack) :: "memory");
+    return stack;
+}
+
+static void handler1(PAL_PTR event, PAL_NUM arg, PAL_CONTEXT* context)
 {
     pal_printf("Arithmetic Exception Handler 1: 0x%08lx, rip = 0x%08lx\n",
                arg, context->rip);
+
+    pal_printf("Stack in handler: %p\n", get_stack());
 
     while (*(unsigned char *) context->rip != 0x90)
         context->rip++;
@@ -17,7 +25,7 @@ void handler1 (PAL_PTR event, PAL_NUM arg, PAL_CONTEXT * context)
     DkExceptionReturn(event);
 }
 
-void handler2 (PAL_PTR event, PAL_NUM arg, PAL_CONTEXT * context)
+static void handler2(PAL_PTR event, PAL_NUM arg, PAL_CONTEXT* context)
 {
     pal_printf("Arithmetic Exception Handler 2: 0x%08lx, rip = 0x%08lx\n",
                arg, context->rip);
@@ -28,7 +36,7 @@ void handler2 (PAL_PTR event, PAL_NUM arg, PAL_CONTEXT * context)
     DkExceptionReturn(event);
 }
 
-void handler3 (PAL_PTR event, PAL_NUM arg, PAL_CONTEXT * context)
+static void handler3(PAL_PTR event, PAL_NUM arg, PAL_CONTEXT* context)
 {
     pal_printf("Memory Fault Exception Handler: 0x%08lx, rip = 0x%08lx\n",
                arg, context->rip);
@@ -41,7 +49,7 @@ void handler3 (PAL_PTR event, PAL_NUM arg, PAL_CONTEXT * context)
 
 atomic_bool handler4_called = false;
 
-void handler4(PAL_PTR event, PAL_NUM arg, PAL_CONTEXT * context)
+static void handler4(PAL_PTR event, PAL_NUM arg, PAL_CONTEXT* context)
 {
     pal_printf("Arithmetic Exception Handler 4: 0x%" PRIx64 ", rip = 0x%" PRIx64 "\n", arg, context->rip);
 
@@ -53,8 +61,7 @@ void handler4(PAL_PTR event, PAL_NUM arg, PAL_CONTEXT * context)
     DkExceptionReturn(event);
 }
 
-
-static void red_zone_test() {
+static void red_zone_test(void) {
     uint64_t res = 0;
 
     // First call some function to ensure that gcc doesn't use the red zone
@@ -108,6 +115,8 @@ static void red_zone_test() {
 int main (void)
 {
     volatile long i;
+
+    pal_printf("Stack in main: %p\n", get_stack());
 
     DkSetExceptionHandler(handler1, PAL_EVENT_ARITHMETIC_ERROR);
     i = 0;

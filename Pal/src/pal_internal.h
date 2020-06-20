@@ -1,18 +1,5 @@
-/* Copyright (C) 2014 Stony Brook University
-   This file is part of Graphene Library OS.
-
-   Graphene Library OS is free software: you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public License
-   as published by the Free Software Foundation, either version 3 of the
-   License, or (at your option) any later version.
-
-   Graphene Library OS is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
+/* Copyright (C) 2014 Stony Brook University */
 
 /*
  * pal_internal.h
@@ -132,32 +119,6 @@ static inline const struct handle_ops * HANDLE_OPS (PAL_HANDLE handle)
     return pal_handle_ops[_type];
 }
 
-/* integer hash functions defined inline. The algorithm we used here
-  is based on Robert Jenkins developed in 96', the algorithm has two
-  versions, 32-bit one and 64-bit one. */
-static inline uint32_t hash32 (uint32_t key)
-{
-    key = ~key + (key << 15);
-    key = key ^ (key >> 12);
-    key = key + (key << 2);
-    key = key ^ (key >> 4);
-    key = (key + (key << 3)) + (key << 11);
-    key = key ^ (key >> 16);
-    return key;
-}
-
-static inline uint64_t hash64 (uint64_t key)
-{
-    key = (~key) + (key << 21);
-    key = key ^ (key >> 24);
-    key = (key + (key << 3)) + (key << 8);
-    key = key ^ (key >> 14);
-    key = (key + (key << 2)) + (key << 4);
-    key = key ^ (key >> 28);
-    key = key + (key << 31);
-    return key;
-}
-
 /* We allow dynamic size handle allocation. Here is some macro to help
    deciding the actual size of the handle */
 extern PAL_HANDLE _h;
@@ -200,14 +161,6 @@ extern struct pal_internal_state {
     const char *    exec;
     PAL_HANDLE      exec_handle;
 
-    PAL_HANDLE      log_stream;
-    enum {
-        LOG_FILE    = 0x01,
-        LOG_PIPE    = 0x02,
-        LOG_SOCKET  = 0x04,
-        LOG_GENERIC_TYPES = 0x08,
-    } log_types;
-
     struct config_store * root_config;
 
     /* May not be the same as page size, see e.g. SYSTEM_INFO::dwAllocationGranularity on Windows.
@@ -217,24 +170,7 @@ extern struct pal_internal_state {
     PAL_HANDLE      console;
 
     unsigned long   start_time;
-#if PROFILING == 1
-    unsigned long   relocation_time;
-    unsigned long   linking_time;
-    unsigned long   manifest_loading_time;
-    unsigned long   slab_time;
-    unsigned long   tail_startup_time;
-    unsigned long   process_create_time;
-#endif
 } pal_state;
-
-#ifdef __GNUC__
-#define BREAK()                         \
-    do {                                \
-        __asm__ volatile ("int $3");    \
-    } while (0)
-#else
-#define BREAK()
-#endif
 
 extern PAL_CONTROL __pal_control;
 
@@ -245,22 +181,28 @@ extern PAL_CONTROL __pal_control;
 #define ALLOC_ALIGN_DOWN(addr)     ALIGN_DOWN_POW2(addr, pal_state.alloc_align)
 #define ALLOC_ALIGN_DOWN_PTR(addr) ALIGN_DOWN_PTR_POW2(addr, pal_state.alloc_align)
 
-/* Main initialization function */
-noreturn void pal_main (
-        PAL_NUM    instance_id,      /* current instance id */
-        PAL_HANDLE manifest_handle,  /* manifest handle if opened */
-        PAL_HANDLE exec_handle,      /* executable handle if opened */
-        PAL_PTR    exec_loaded_addr, /* executable addr if loaded */
-        PAL_HANDLE parent_process,   /* parent process if it's a child */
-        PAL_HANDLE first_thread,     /* first thread handle */
-        PAL_STR *  arguments,        /* application arguments */
-        PAL_STR *  environments      /* environment variables */
-    );
+/*!
+ * \brief Main initialization function
+ *
+ * This function must be called by the host-specific loader.
+ *
+ * \param instance_id       current instance id
+ * \param manifest_handle   manifest handle if opened
+ * \param exec_handle       executable handle if opened
+ * \param exec_loaded_addr  executable addr if loaded
+ * \param parent_process    parent process if it's a child
+ * \param first_thread      first thread handle
+ * \param arguments         application arguments
+ * \param environments      environment variables
+ */
+noreturn void pal_main(
+    PAL_NUM instance_id, PAL_HANDLE manifest_handle, PAL_HANDLE exec_handle,
+    PAL_PTR exec_loaded_addr, PAL_HANDLE parent_process, PAL_HANDLE first_thread,
+    PAL_STR* arguments, PAL_STR* environments);
 
 /* For initialization */
-unsigned long _DkGetPagesize (void);
 unsigned long _DkGetAllocationAlignment (void);
-void _DkGetAvailableUserAddressRange (PAL_PTR * start, PAL_PTR * end, PAL_PTR * hole_start, PAL_PTR * hole_end);
+void _DkGetAvailableUserAddressRange(PAL_PTR* start, PAL_PTR* end, PAL_NUM* gap);
 bool _DkCheckMemoryMappable (const void * addr, size_t size);
 PAL_NUM _DkGetProcessId (void);
 PAL_NUM _DkGetHostId (void);
@@ -271,8 +213,8 @@ int _DkGetCPUInfo (PAL_CPU_INFO * info);
 
 /* Internal DK calls, in case any of the internal routines needs to use them */
 /* DkStream calls */
-int _DkStreamOpen (PAL_HANDLE * handle, const char * uri,
-                   int access, int share, int create, int options);
+int _DkStreamOpen(PAL_HANDLE* handle, const char* uri, int access, int share, int create,
+                  int options);
 int _DkStreamDelete (PAL_HANDLE handle, int access);
 int64_t _DkStreamRead (PAL_HANDLE handle, uint64_t offset, uint64_t count,
                        void * buf, char * addr, int addrlen);
@@ -348,31 +290,34 @@ int _DkSegmentRegisterSet (int reg, const void * addr);
 int _DkSegmentRegisterGet (int reg, void ** addr);
 int _DkInstructionCacheFlush (const void * addr, int size);
 int _DkCpuIdRetrieve (unsigned int leaf, unsigned int subleaf, unsigned int values[4]);
+int _DkAttestationReport(PAL_PTR user_report_data, PAL_NUM* user_report_data_size,
+                         PAL_PTR target_info, PAL_NUM* target_info_size,
+                         PAL_PTR report, PAL_NUM* report_size);
+int _DkAttestationQuote(PAL_PTR user_report_data, PAL_NUM user_report_data_size,
+                        PAL_PTR quote, PAL_NUM* quote_size);
 
-#define INIT_FAIL(exitcode, reason)                                     \
-    do {                                                                \
-        printf("PAL failed at " __FILE__  ":%s:%u (exitcode = %u, reason=%s)\n", \
-               __FUNCTION__, (unsigned int)__LINE__,                    \
-               (unsigned int) (exitcode), (const char *) (reason));     \
-        _DkProcessExit(exitcode);                                       \
+#define INIT_FAIL(exitcode, reason)                                                     \
+    do {                                                                                \
+        printf("PAL failed at " __FILE__  ":%s:%u (exitcode = %u, reason=%s)\n",        \
+               __FUNCTION__, (unsigned int)__LINE__, (unsigned int)(exitcode), reason); \
+        _DkProcessExit(exitcode);                                                       \
     } while (0)
 
-/* function and definition for loading binaries */
+/* Loading ELF binaries */
 enum object_type { OBJECT_RTLD, OBJECT_EXEC, OBJECT_PRELOAD, OBJECT_EXTERNAL };
 
-int check_elf_object (PAL_HANDLE handle);
+bool has_elf_magic(const void* header, size_t len);
+bool is_elf_object(PAL_HANDLE handle);
 int load_elf_object (const char * uri, enum object_type type);
 int load_elf_object_by_handle (PAL_HANDLE handle, enum object_type type);
 int add_elf_object(void * addr, PAL_HANDLE handle, int type);
 
-#ifndef NO_INTERNAL_ALLOC
 void init_slab_mgr (int alignment);
 void * malloc (size_t size);
 void * malloc_copy(const void * mem, size_t size);
 void * calloc (size_t nmem, size_t size);
 char * strdup(const char *source);
 void free (void * mem);
-#endif
 
 #ifdef __GNUC__
 # define __attribute_hidden __attribute__ ((visibility ("hidden")))
@@ -398,34 +343,6 @@ void _DkPrintConsole (const void * buf, int size);
 int printf  (const char  *fmt, ...) __attribute__((format (printf, 1, 2)));
 #include <stdarg.h>
 int vprintf(const char * fmt, va_list ap) __attribute__((format (printf, 1, 0)));
-void write_log (int nstrs, ...);
-
-static inline void log_stream (const char * uri)
-{
-    if (!uri || !pal_state.log_stream)
-        return;
-
-    bool logging = false;
-
-    if ((pal_state.log_types & LOG_FILE) &&
-        uri[0] == 'f' && uri[1] == 'i' && uri[2] == 'l' && uri[3] == 'e')
-        logging = true;
-
-    if ((pal_state.log_types & LOG_PIPE) &&
-        uri[0] == 'p' && uri[1] == 'i' && uri[2] == 'p' && uri[3] == 'e')
-        logging = true;
-
-    if ((pal_state.log_types & LOG_SOCKET) &&
-        uri[0] == 't' && uri[1] == 'c' && uri[2] == 'p')
-        logging = true;
-
-    if ((pal_state.log_types & LOG_SOCKET) &&
-        uri[0] == 'u' && uri[1] == 'd' && uri[2] == 'p')
-        logging = true;
-
-    if (logging)
-        write_log(2, uri, "\n");
-}
 
 /* errval is negative value, see pal_strerror */
 static inline void print_error(const char* errstring, int errval) {

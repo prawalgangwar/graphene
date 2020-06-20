@@ -1,42 +1,63 @@
-/* Copyright (C) 2017, Texas A&M University.
-
-   This file is part of Graphene Library OS.
-
-   Graphene Library OS is free software: you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public License
-   as published by the Free Software Foundation, either version 3 of the
-   License, or (at your option) any later version.
-
-   Graphene Library OS is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
+/* Copyright (C) 2017, Texas A&M University */
 
 #ifndef SGX_ATTEST_H
 #define SGX_ATTEST_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "sgx_arch.h"
 
-typedef struct {
-    uint16_t version;
-    uint16_t sigtype;
-    uint32_t gid;
-    uint16_t isvsvn_qe;
-    uint16_t isvsvn_pce;
-    uint8_t reserved[4];
-    uint8_t base[32];
-} __attribute__((packed)) sgx_quote_body_t;
+#pragma pack(push, 1)
 
-typedef struct {
-    sgx_quote_body_t body;
+/* different attestation key algorithms */
+typedef enum {
+    SGX_QL_ALG_EPID       = 0, /* EPID 2.0 - Anonymous */
+    SGX_QL_ALG_RESERVED_1 = 1, /* reserved */
+    SGX_QL_ALG_ECDSA_P256 = 2, /* ECDSA-256-with-P-256 curve, non-anonymous */
+    SGX_QL_ALG_ECDSA_P384 = 3, /* ECDSA-384-with-P-384 curve, non-anonymous */
+    SGX_QL_ALG_CNT        = 4,
+} sgx_ql_attestation_algorithm_id_t;
+
+/* generic attestation key format */
+typedef struct _att_key_id_t {
+    uint8_t     att_key_id[256];
+} sgx_att_key_id_t;
+
+/* single DCAP attestation key, contains both QE identity and the attestation algorithm ID */
+typedef struct _sgx_ql_att_key_id_t {
+    uint16_t    id;                   /* structure ID */
+    uint16_t    version;              /* structure version */
+    uint16_t    mrsigner_length;      /* number of valid bytes in MRSIGNER */
+    uint8_t     mrsigner[48];         /* SHA256 or SHA384 hash of public key that signed QE */
+    uint32_t    prod_id;              /* legacy Product ID of QE */
+    uint8_t     extended_prod_id[16]; /* extended Product ID of QE (all 0's for legacy) */
+    uint8_t     config_id[64];        /* Config ID of QE */
+    uint8_t     family_id[16];        /* Family ID of QE */
+    uint32_t    algorithm_id;         /* Identity of the attestation key algorithm */
+} sgx_ql_att_key_id_t;
+
+typedef uint8_t sgx_epid_group_id_t[4];
+
+typedef struct _sgx_basename_t {
+    uint8_t name[32];
+} sgx_basename_t;
+
+typedef struct _sgx_quote_t {
+    uint16_t version;
+    uint16_t sign_type;
+    sgx_epid_group_id_t epid_group_id;
+    sgx_isv_svn_t qe_svn;
+    sgx_isv_svn_t pce_svn;
+    uint32_t xeid;
+    sgx_basename_t basename;
     sgx_report_body_t report_body;
-    uint32_t sig_len;
-} __attribute__((packed)) sgx_quote_t;
+    uint32_t signature_len;
+    uint8_t signature[];
+} sgx_quote_t;
+
+#define SGX_QUOTE_BODY_SIZE (offsetof(sgx_quote_t, signature_len))
 
 typedef uint8_t sgx_spid_t[16];
 typedef uint8_t sgx_quote_nonce_t[16];
@@ -46,30 +67,29 @@ enum {
     SGX_LINKABLE_SIGNATURE
 };
 
-#define SGX_QUOTE_MAX_SIZE 2048
+/* EPID SGX quotes are ~1K in size, DCAP SGX quotes ~4K, overapproximate to 8K */
+#define SGX_QUOTE_MAX_SIZE 8192
 
-#define IAS_REPORT_URL "https://api.trustedservices.intel.com/sgx/dev/attestation/v3/report"
+/*!
+ * \brief Obtain SGX Quote from the Quoting Enclave (communicate via AESM).
+ *
+ * First create enclave report (sgx_report_t) with target info of the Quoting Enclave, and
+ * then call out of the enclave to request the corresponding Quote from the Quoting Enclave.
+ * Communication is done via AESM service, in the form of protobuf request/response messages.
+ *
+ * \param[in]  spid         Software provider ID (SPID).
+ * \param[in]  nonce        16B nonce to be included in the quote for freshness.
+ * \param[in]  report_data  64B bytestring to be included in the report and the quote.
+ * \param[in]  linkable     Quote type (linkable vs unlinkable).
+ * \param[out] quote        Quote returned by the Quoting Enclave (allocated via malloc() in this
+ *                          function; the caller gets the ownership of the quote).
+ * \param[out] quote_len    Length of the quote returned by the Quoting Enclave.
+ * \return                  0 on success, negative PAL error code otherwise.
+ */
+int sgx_get_quote(const sgx_spid_t* spid, const sgx_quote_nonce_t* nonce,
+                  const sgx_report_data_t* report_data, bool linkable,
+                  char** quote, size_t* quote_len);
 
-int init_trusted_platform(void);
-
-typedef struct {
-    sgx_report_t qe_report;
-    sgx_quote_t* quote;
-    size_t       quote_len;
-    char*        ias_report;
-    size_t       ias_report_len;
-    uint8_t*     ias_sig;
-    size_t       ias_sig_len;
-    char*        ias_certs;
-    size_t       ias_certs_len;
-} __attribute__((packed)) sgx_attestation_t;
-
-int sgx_verify_platform(sgx_spid_t* spid, const char* subkey, sgx_quote_nonce_t* nonce,
-                        sgx_report_data_t* report_data, bool linkable,
-                        bool accept_group_out_of_date, bool accept_configuration_needed,
-                        sgx_attestation_t* ret_attestation, char** ret_ias_status,
-                        char** ret_ias_timestamp);
-
-#define HTTPS_REQUEST_MAX_LENGTH 256
+#pragma pack(pop)
 
 #endif /* SGX_ATTEST_H */

@@ -1,44 +1,97 @@
 include ../../../../Scripts/Makefile.configs
 include Makefile.am
 
-ias_cert_url ?= https://certificates.trustedservices.intel.com/Intel_SGX_Attestation_RootCA.pem
-ias_cert_sha256 ?= e7b9113b647bc6bd421d4f140076a3acc31e410e01bf12883841e824cdaf1564
-ias_cert_file = quote/$(notdir $(ias_cert_url))
+CFLAGS += \
+	-I. \
+	-Iinclude \
+	-I../.. \
+	-I../../../include \
+	-I../../../include/pal \
+	-I../../../include/arch/$(ARCH) \
+	-I../../../include/arch/$(ARCH)/Linux \
+	-I../../../include/host/Linux-SGX \
+	-I../../../include/host/Linux-common \
+	-I../../../include/lib \
+	-I../../../lib/crypto/mbedtls/include \
+	-I../../../lib/crypto/mbedtls/crypto/include \
+	-Isgx-driver
 
-CFLAGS += -I. -Iinclude -I../.. -I../../../include -I../../../include/pal \
-	-I../../../lib/crypto/mbedtls/include -I../../../include/host/Linux-SGX \
-	-I../../../include/lib -Isgx-driver
-ASFLAGS += -I. -I../.. -I../../../include
+ASFLAGS += \
+	-I. \
+	-I../.. \
+	-I../../../include \
+	-I../../../include/arch/$(ARCH)/Linux
 
 host_files = libpal-Linux-SGX.a pal-sgx debugger/sgx_gdb.so pal.map generated_offsets.py
 
 defs	= -DIN_PAL -DPAL_DIR=$(PAL_DIR) -DRUNTIME_DIR=$(RUNTIME_DIR)
 CFLAGS += $(defs)
 ASFLAGS += $(defs)
-enclave-objs = $(addprefix db_,files devices pipes eventfd sockets streams memory \
-		 threading mutex events process object main rtld \
-		 exception misc) \
-	       $(addprefix enclave_,ocalls ecalls framework platform pages untrusted xstate)
-enclave-asm-objs = enclave_entry
-urts-objs = $(addprefix sgx_,enclave framework platform main rtld thread process exception graphene) \
-	    quote/aesm.pb-c clone-x86_64
-urts-asm-objs = sgx_entry
+
+commons_objs = bogomips.o
+
+enclave-objs = \
+	db_devices.o \
+	db_eventfd.o \
+	db_events.o \
+	db_exception.o \
+	db_files.o \
+	db_main.o \
+	db_main-$(ARCH).o \
+	db_memory.o \
+	db_misc.o \
+	db_mutex.o \
+	db_object.o \
+	db_pipes.o \
+	db_process.o \
+	db_rtld.o \
+	db_sockets.o \
+	db_streams.o \
+	db_threading.o \
+	enclave_ecalls.o \
+	enclave_framework.o \
+	enclave_ocalls.o \
+	enclave_pages.o \
+	enclave_platform.o \
+	enclave_untrusted.o \
+	enclave_xstate.o \
+	$(commons_objs)
+
+enclave-asm-objs = enclave_entry.o
+
+urts-objs = \
+	clone-x86_64.o \
+	sgx_enclave.o \
+	sgx_exception.o \
+	sgx_framework.o \
+	sgx_graphene.o \
+	sgx_main.o \
+	sgx_platform.o \
+	sgx_process.o \
+	sgx_rtld.o \
+	sgx_thread.o \
+	quote/aesm.pb-c.o
+
+urts-asm-objs = sgx_entry.o
+
 graphene_lib = .lib/graphene-lib.a
 
 .PHONY: all
-all: sgx-driver/isgx_version.h $(host_files)
+all: sgx-driver/sgx.h $(host_files) tools
 
-libpal-Linux-SGX.a: $(addsuffix .o,$(enclave-objs) $(enclave-asm-objs))
+libpal-Linux-SGX.a: $(enclave-objs) $(enclave-asm-objs)
 	$(call cmd,ar_a_o)
 
-$(addsuffix .o,$(enclave-objs)): CFLAGS += -DIN_ENCLAVE
-$(addsuffix .i,$(enclave-objs)): CFLAGS += -DIN_ENCLAVE
-$(addsuffix .s,$(enclave-objs)): CFLAGS += -DIN_ENCLAVE
-$(addsuffix .o,$(enclave-asm-objs)): ASFLAGS += -DIN_ENCLAVE
-$(addsuffix .s,$(enclave-asm-objs)): ASFLAGS += -DIN_ENCLAVE
+$(enclave-objs): CFLAGS += -DIN_ENCLAVE
+$(patsubst %.o,%.i,$(enclave-objs)): CFLAGS += -DIN_ENCLAVE
+$(patsubst %.o,%.s,$(enclave-objs)): CFLAGS += -DIN_ENCLAVE
+$(enclave-asm-objs): ASFLAGS += -DIN_ENCLAVE
+$(patsubst %.o,%.s,$(enclave-asm-objs)): ASFLAGS += -DIN_ENCLAVE
 
-$(addsuffix .o,$(urts-objs)): quote/aesm.pb-c.h
-$(addsuffix .o,$(enclave-objs)): quote/generated-cacert.h
+$(urts-objs): quote/aesm.pb-c.h
+
+$(commons_objs): %.o: ../Linux-common/%.c
+	$(call cmd,cc_o_c)
 
 %.o: %.c
 	$(call cmd,cc_o_c)
@@ -57,7 +110,7 @@ $(addsuffix .o,$(enclave-objs)): quote/generated-cacert.h
 
 CFLAGS-pal-sgx = -Wl,-z,relro,-z,now -pie
 LDLIBS-pal-sgx += -lprotobuf-c
-pal-sgx: $(addsuffix .o,$(urts-objs) $(urts-asm-objs)) $(graphene_lib)
+pal-sgx: $(urts-objs) $(urts-asm-objs) $(graphene_lib)
 	$(call cmd,cmulti)
 
 quote/aesm.pb-c.o: quote/aesm.pb-c.c quote/aesm.pb-c.h
@@ -66,12 +119,6 @@ quote/aesm.pb-c.c quote/aesm.pb-c.h: quote/aesm.proto
 	@echo [ host/Linux-SGX/quote/aesm.pb-c.h ]
 	@protoc-c --c_out=. $<
 
-quote/generated-cacert.h: $(ias_cert_file)
-	@echo "#define IAS_CA_CERT \"$(shell cat $< | tr -d '[\r\n]')\"" > $@
-
-$(ias_cert_file):
-	@../../../../Scripts/download --output $@ --url $(ias_cert_url) --sha256 $(ias_cert_sha256)
-
 debugger/sgx_gdb.so: CFLAGS =
 CFLAGS-debugger/sgx_gdb.so = -shared -Wall -fPIC -O2 -std=c11
 debugger/sgx_gdb.so: debugger/sgx_gdb.c
@@ -79,7 +126,7 @@ debugger/sgx_gdb.so: debugger/sgx_gdb.c
 
 enclave_entry.o sgx_entry.o: asm-offsets.h
 
-sgx-driver/isgx_version.h:
+sgx-driver/sgx.h:
 	$(MAKE) -C sgx-driver $(notdir $@)
 
 ifeq ($(filter %clean,$(MAKECMDGOALS)),)
@@ -88,24 +135,28 @@ endif
 
 include ../../../../Scripts/Makefile.rules
 
+.PHONY: tools
+tools:
+	$(MAKE) -C tools
+
 CLEAN_FILES += $(notdir $(pal_static) $(pal_lib) $(pal_loader))
 CLEAN_FILES += debugger/sgx_gdb.so
 CLEAN_FILES += quote/aesm.pb-c.c quote/aesm.pb-c.h quote/aesm.pb-c.d quote/aesm.pb-c.o
-CLEAN_FILES += quote/generated-cacert.h
 
 .PHONY: clean_
 clean_:
-	rm -rf *.o *.e *.i *.s $(host_files) $(CLEAN_FILES) *.d debugger/*.d signer/*.pyc __pycache__ \
-	       signer/__pycache__
+	$(RM) -r *.o *.e *.i *.s $(host_files) $(CLEAN_FILES) *.d debugger/*.d signer/*.pyc __pycache__ \
+	         signer/__pycache__
 
 .PHONY: clean
 clean: clean_
 	$(MAKE) -C sgx-driver $@
+	$(MAKE) -C tools $@
 
 .PHONY: distclean
 distclean: clean_
-	rm -f $(ias_cert_file)
 	$(MAKE) -C sgx-driver $@
+	$(MAKE) -C tools $@
 
 .PHONY: test
 test:

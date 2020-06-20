@@ -1,18 +1,5 @@
-/* Copyright (C) 2014 Stony Brook University
-   This file is part of Graphene Library OS.
-
-   Graphene Library OS is free software: you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public License
-   as published by the Free Software Foundation, either version 3 of the
-   License, or (at your option) any later version.
-
-   Graphene Library OS is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
+/* Copyright (C) 2014 Stony Brook University */
 
 /*
  * shim_ipc.c
@@ -29,7 +16,9 @@
 #include <shim_handle.h>
 #include <shim_internal.h>
 #include <shim_ipc.h>
-#include <shim_profile.h>
+#include <shim_ipc_helper.h>
+#include <shim_ipc_pid.h>
+#include <shim_ipc_sysv.h>
 #include <shim_thread.h>
 #include <shim_unistd.h>
 #include <shim_utils.h>
@@ -55,13 +44,6 @@ struct shim_process cur_process;
 #define CLIENT_HASH(vmid)  ((vmid)&CLIENT_HASH_MASK)
 DEFINE_LISTP(shim_ipc_info);
 static LISTP_TYPE(shim_ipc_info) info_hlist[CLIENT_HASH_NUM];
-
-DEFINE_PROFILE_CATEGORY(ipc, );
-DEFINE_PROFILE_OCCURENCE(syscall_use_ipc, ipc);
-
-int init_ipc_ports(void);
-int init_ns_pid(void);
-int init_ns_sysv(void);
 
 int init_ipc(void) {
     int ret = 0;
@@ -331,12 +313,12 @@ int send_ipc_message(struct shim_ipc_msg* msg, struct shim_ipc_port* port) {
             DkStreamWrite(port->pal_handle, 0, total_bytes - bytes, (void*)msg + bytes, NULL);
 
         if (ret == PAL_STREAM_ERROR) {
-            if (PAL_ERRNO == EINTR || PAL_ERRNO == EAGAIN || PAL_ERRNO == EWOULDBLOCK)
+            if (PAL_ERRNO() == EINTR || PAL_ERRNO() == EAGAIN || PAL_ERRNO() == EWOULDBLOCK)
                 continue;
 
             debug("Port %p (handle %p) was removed during sending\n", port, port->pal_handle);
             del_ipc_port_fini(port, -ECHILD);
-            return -PAL_ERRNO;
+            return -PAL_ERRNO();
         }
 
         bytes += ret;
@@ -454,57 +436,6 @@ int get_ipc_info_cur_process(struct shim_ipc_info** info) {
     return 0;
 }
 
-DEFINE_PROFILE_INTERVAL(ipc_checkpoint_send, ipc);
-DEFINE_PROFILE_INTERVAL(ipc_checkpoint_callback, ipc);
-
-/* Graphene's checkpoint() syscall broadcasts a msg to all processes
- * asking to checkpoint their state and save in process-unique file in
- * directory cpdir under session cpsession. */
-int ipc_checkpoint_send(const char* cpdir, IDTYPE cpsession) {
-    BEGIN_PROFILE_INTERVAL();
-    int ret;
-    size_t len = strlen(cpdir);
-
-    size_t total_msg_size    = get_ipc_msg_size(sizeof(struct shim_ipc_checkpoint) + len + 1);
-    struct shim_ipc_msg* msg = __alloca(total_msg_size);
-    init_ipc_msg(msg, IPC_CHECKPOINT, total_msg_size, 0);
-
-    struct shim_ipc_checkpoint* msgin = (struct shim_ipc_checkpoint*)&msg->msg;
-    msgin->cpsession                  = cpsession;
-    memcpy(&msgin->cpdir, cpdir, len + 1);
-
-    debug("IPC broadcast to all: IPC_CHECKPOINT(%u, %s)\n", cpsession, cpdir);
-
-    /* broadcast to all including myself (so I can also checkpoint) */
-    ret = broadcast_ipc(msg, IPC_PORT_DIRCLD | IPC_PORT_DIRPRT,
-                        /*exclude_port=*/NULL);
-    SAVE_PROFILE_INTERVAL(ipc_checkpoint_send);
-    return ret;
-}
-
-/* This process is asked to create a checkpoint, so it:
- * - sends a Graphene-specific SIGCP signal to all its threads (for
- *   all to stop and join the checkpoint for consistent state),
- * - broadcasts checkpoint msg further to other processes. */
-int ipc_checkpoint_callback(struct shim_ipc_msg* msg, struct shim_ipc_port* port) {
-    BEGIN_PROFILE_INTERVAL();
-    int ret                           = 0;
-    struct shim_ipc_checkpoint* msgin = (struct shim_ipc_checkpoint*)msg->msg;
-
-    debug("IPC callback from %u: IPC_CHECKPOINT(%u, %s)\n", msg->src, msgin->cpsession,
-          msgin->cpdir);
-
-    ret = create_checkpoint(msgin->cpdir, &msgin->cpsession);
-    if (ret < 0)
-        goto out;
-
-    kill_all_threads(NULL, msgin->cpsession, SIGCP);
-    broadcast_ipc(msg, IPC_PORT_DIRCLD | IPC_PORT_DIRPRT, port);
-out:
-    SAVE_PROFILE_INTERVAL(ipc_checkpoint_callback);
-    return ret;
-}
-
 BEGIN_CP_FUNC(ipc_info) {
     __UNUSED(size);
     assert(size == sizeof(struct shim_ipc_info));
@@ -512,7 +443,7 @@ BEGIN_CP_FUNC(ipc_info) {
     struct shim_ipc_info* info     = (struct shim_ipc_info*)obj;
     struct shim_ipc_info* new_info = NULL;
 
-    ptr_t off = GET_FROM_CP_MAP(obj);
+    size_t off = GET_FROM_CP_MAP(obj);
 
     if (!off) {
         off = ADD_CP_OFFSET(sizeof(struct shim_ipc_info));
@@ -552,7 +483,7 @@ BEGIN_CP_FUNC(process) {
     struct shim_process* process     = (struct shim_process*)obj;
     struct shim_process* new_process = NULL;
 
-    ptr_t off = GET_FROM_CP_MAP(obj);
+    size_t off = GET_FROM_CP_MAP(obj);
 
     if (!off) {
         off = ADD_CP_OFFSET(sizeof(struct shim_process));

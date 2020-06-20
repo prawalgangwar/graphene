@@ -1,18 +1,5 @@
-/* Copyright (C) 2014 Stony Brook University
-   This file is part of Graphene Library OS.
-
-   Graphene Library OS is free software: you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public License
-   as published by the Free Software Foundation, either version 3 of the
-   License, or (at your option) any later version.
-
-   Graphene Library OS is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
+/* Copyright (C) 2014 Stony Brook University */
 
 /*
  * db_files.c
@@ -29,6 +16,7 @@
 #include "pal_debug.h"
 #include "pal_defs.h"
 #include "pal_error.h"
+#include "pal_flags_conv.h"
 #include "pal_internal.h"
 #include "pal_linux.h"
 #include "pal_linux_defs.h"
@@ -48,7 +36,10 @@ static int file_open(PAL_HANDLE* handle, const char* type, const char* uri, int 
     if (strcmp_static(type, URI_TYPE_FILE))
         return -PAL_ERROR_INVAL;
     /* try to do the real open */
-    int fd = ocall_open(uri, access | create | options, share);
+    int fd = ocall_open(uri, PAL_ACCESS_TO_LINUX_OPEN(access)  |
+                             PAL_CREATE_TO_LINUX_OPEN(create)  |
+                             PAL_OPTION_TO_LINUX_OPEN(options),
+                        share);
 
     if (IS_ERR(fd))
         return unix_to_pal_error(ERRNO(fd));
@@ -70,7 +61,8 @@ static int file_open(PAL_HANDLE* handle, const char* type, const char* uri, int 
 
     sgx_stub_t* stubs;
     uint64_t total;
-    ret = load_trusted_file(hdl, &stubs, &total, create);
+    void* umem;
+    ret = load_trusted_file(hdl, &stubs, &total, create, &umem);
     if (ret < 0) {
         SGX_DBG(DBG_E,
                 "Accessing file:%s is denied. (%s) "
@@ -79,20 +71,13 @@ static int file_open(PAL_HANDLE* handle, const char* type, const char* uri, int 
         free(hdl);
         return ret;
     }
+    if (stubs && total) {
+        assert(umem);
+    }
 
     hdl->file.stubs  = (PAL_PTR)stubs;
     hdl->file.total  = total;
-    hdl->file.offset = 0;
-
-    if (hdl->file.stubs && hdl->file.total) {
-        /* case of trusted file: mmap the whole file in untrusted memory for future reads/writes */
-        ret = ocall_mmap_untrusted(hdl->file.fd, 0, hdl->file.total, PROT_READ, &hdl->file.umem);
-        if (IS_ERR(ret)) {
-            /* note that we don't free stubs because they are re-used in same trusted file */
-            free(hdl);
-            return unix_to_pal_error(ERRNO(ret));
-        }
-    }
+    hdl->file.umem = umem;
 
     *handle = hdl;
     return 0;
@@ -104,19 +89,9 @@ static int64_t file_read(PAL_HANDLE handle, uint64_t offset, uint64_t count, voi
     sgx_stub_t* stubs = (sgx_stub_t*)handle->file.stubs;
 
     if (!stubs) {
-        /* case of allowed file: emulate via lseek + read */
-        if (handle->file.offset != offset) {
-            ret = ocall_lseek(handle->file.fd, offset, SEEK_SET);
-            if (IS_ERR(ret))
-                return -PAL_ERROR_DENIED;
-            handle->file.offset = offset;
-        }
-
-        ret = ocall_read(handle->file.fd, buffer, count);
+        ret = ocall_pread(handle->file.fd, buffer, count, offset);
         if (IS_ERR(ret))
             return unix_to_pal_error(ERRNO(ret));
-
-        handle->file.offset = offset + ret;
         return ret;
     }
 
@@ -146,19 +121,9 @@ static int64_t file_write(PAL_HANDLE handle, uint64_t offset, uint64_t count, co
     sgx_stub_t* stubs = (sgx_stub_t*)handle->file.stubs;
 
     if (!stubs) {
-        /* case of allowed file: emulate via lseek + write */
-        if (handle->file.offset != offset) {
-            ret = ocall_lseek(handle->file.fd, offset, SEEK_SET);
-            if (IS_ERR(ret))
-                return -PAL_ERROR_DENIED;
-            handle->file.offset = offset;
-        }
-
-        ret = ocall_write(handle->file.fd, buffer, count);
+        ret = ocall_pwrite(handle->file.fd, buffer, count, offset);
         if (IS_ERR(ret))
             return unix_to_pal_error(ERRNO(ret));
-
-        handle->file.offset = offset + ret;
         return ret;
     }
 
@@ -210,7 +175,7 @@ static int file_map(PAL_HANDLE handle, void** addr, int prot, uint64_t offset, u
      * does not request a specific address.
      */
     if (!mem && !stubs && !(prot & PAL_PROT_WRITECOPY)) {
-        ret = ocall_mmap_untrusted(handle->file.fd, offset, size, HOST_PROT(prot), &mem);
+        ret = ocall_mmap_untrusted(handle->file.fd, offset, size, PAL_PROT_TO_LINUX(prot), &mem);
         if (!IS_ERR(ret))
             *addr = mem;
         return IS_ERR(ret) ? unix_to_pal_error(ERRNO(ret)) : ret;
@@ -225,7 +190,7 @@ static int file_map(PAL_HANDLE handle, void** addr, int prot, uint64_t offset, u
         return -PAL_ERROR_DENIED;
     }
 
-    mem = get_reserved_pages(mem, size);
+    mem = get_enclave_pages(mem, size, /*is_pal_internal=*/false);
     if (!mem)
         return -PAL_ERROR_NOMEM;
 
@@ -387,7 +352,7 @@ static int file_getname(PAL_HANDLE handle, char* buffer, size_t count) {
     return tmp + len - buffer;
 }
 
-const char* file_getrealpath(PAL_HANDLE handle) {
+static const char* file_getrealpath(PAL_HANDLE handle) {
     return handle->file.realpath;
 }
 
@@ -420,13 +385,19 @@ static int dir_open(PAL_HANDLE* handle, const char* type, const char* uri, int a
 
     int ret;
 
-    if (create & PAL_CREATE_TRY) {
+    if (create & PAL_CREATE_TRY || create & PAL_CREATE_ALWAYS) {
         ret = ocall_mkdir(uri, share);
-        if (IS_ERR(ret) && ERRNO(ret) == EEXIST && create & PAL_CREATE_ALWAYS)
-            return -PAL_ERROR_STREAMEXIST;
+
+        if (IS_ERR(ret)) {
+            if (ERRNO(ret) == EEXIST && create & PAL_CREATE_ALWAYS)
+                return -PAL_ERROR_STREAMEXIST;
+            if (ERRNO(ret) != EEXIST)
+                return unix_to_pal_error(ERRNO(ret));
+            assert(ERRNO(ret) == EEXIST && create & PAL_CREATE_TRY);
+        }
     }
 
-    ret = ocall_open(uri, O_DIRECTORY | options, 0);
+    ret = ocall_open(uri, O_DIRECTORY | PAL_OPTION_TO_LINUX_OPEN(options), 0);
     if (IS_ERR(ret))
         return unix_to_pal_error(ERRNO(ret));
 

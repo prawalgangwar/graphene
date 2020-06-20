@@ -1,9 +1,9 @@
-#!$(PAL)
-
 loader.exec = file:file_check_policy
+loader.argv0_override = file_check_policy
 loader.preload = file:$(SHIMPATH)
 loader.env.LD_LIBRARY_PATH = /lib
 loader.debug_type = none
+loader.insecure__use_cmdline_argv = 1
 
 fs.mount.lib.type = chroot
 fs.mount.lib.path = /lib
@@ -15,3 +15,5 @@ sgx.trusted_files.ld = file:$(LIBCDIR)/ld-linux-x86-64.so.2
 sgx.trusted_files.libc = file:$(LIBCDIR)/libc.so.6
 
 sgx.trusted_files.test = file:trusted_testfile
+
+sgx.static_address = 1

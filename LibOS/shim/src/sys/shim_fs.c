@@ -1,18 +1,5 @@
-/* Copyright (C) 2014 Stony Brook University
-   This file is part of Graphene Library OS.
-
-   Graphene Library OS is free software: you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public License
-   as published by the Free Software Foundation, either version 3 of the
-   License, or (at your option) any later version.
-
-   Graphene Library OS is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
+/* Copyright (C) 2014 Stony Brook University */
 
 /*
  * shim_fs.c
@@ -22,9 +9,12 @@
  * "sendfile".
  */
 
+#define __KERNEL__
+
 #include <asm/mman.h>
 #include <errno.h>
 #include <linux/fcntl.h>
+#include <linux/stat.h>
 
 #include <pal.h>
 #include <pal_error.h>
@@ -34,10 +24,6 @@
 #include <shim_table.h>
 #include <shim_thread.h>
 #include <shim_utils.h>
-
-/* FIXME(mkow): for some reason it must be included last, otherwise S_IFREG is not being
- * defined inside (sic!). */
-#include <linux/stat.h>
 
 /* The kernel would look up the parent directory, and remove the child from the inode. But we are
  * working with the PAL, so we open the file, truncate and close it. */
@@ -196,6 +182,9 @@ int shim_do_chmod(const char* path, mode_t mode) {
     struct shim_dentry* dent = NULL;
     int ret = 0;
 
+    /* This isn't documented, but that's what Linux does. */
+    mode &= 07777;
+
     if (test_user_string(path))
         return -EFAULT;
 
@@ -221,6 +210,9 @@ int shim_do_fchmodat(int dfd, const char* filename, mode_t mode) {
 
     if (test_user_string(filename))
         return -EFAULT;
+
+    /* This isn't documented, but that's what Linux does. */
+    mode &= 07777;
 
     struct shim_dentry* dir = NULL;
     struct shim_dentry* dent = NULL;
@@ -251,6 +243,9 @@ int shim_do_fchmod(int fd, mode_t mode) {
     struct shim_handle* hdl = get_fd_handle(fd, NULL, NULL);
     if (!hdl)
         return -EBADF;
+
+    /* This isn't documented, but that's what Linux does. */
+    mode &= 07777;
 
     struct shim_dentry* dent = hdl->dentry;
     int ret = 0;

@@ -30,7 +30,6 @@ DkStreamAttributesQueryByHandle
 DkStreamAttributesQuery
 DkProcessCreate
 DkProcessExit
-DkProcessSandboxCreate
 DkSystemTimeQuery
 DkRandomBitsRead
 DkInstructionCacheFlush
@@ -44,6 +43,9 @@ DkStreamAttributesSetByHandle
 DkMemoryAvailableQuota
 DkDebugAttachBinary
 DkDebugDetachBinary
+DkAttestationReport
+DkAttestationQuote
 pal_printf
 pal_control_addr
 pal_strerror
+warn

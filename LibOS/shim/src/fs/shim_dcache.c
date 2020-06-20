@@ -1,19 +1,7 @@
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
 /* Copyright (C) 2014 Stony Brook University,
-   2017 University of North Carolina at Chapel Hill and Fortanix, Inc.
-   This file is part of Graphene Library OS.
-
-   Graphene Library OS is free software: you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public License
-   as published by the Free Software Foundation, either version 3 of the
-   License, or (at your option) any later version.
-
-   Graphene Library OS is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+ * 2017 University of North Carolina at Chapel Hill and Fortanix, Inc.
+ */
 
 /*
  * shim_dcache.c
@@ -340,7 +328,7 @@ BEGIN_CP_FUNC(dentry) {
     struct shim_dentry* dent     = (struct shim_dentry*)obj;
     struct shim_dentry* new_dent = NULL;
 
-    ptr_t off = GET_FROM_CP_MAP(obj);
+    size_t off = GET_FROM_CP_MAP(obj);
 
     if (!off) {
         off = ADD_CP_OFFSET(sizeof(struct shim_dentry));
@@ -353,14 +341,21 @@ BEGIN_CP_FUNC(dentry) {
         INIT_LIST_HEAD(new_dent, list);
         INIT_LISTP(&new_dent->children);
         INIT_LIST_HEAD(new_dent, siblings);
-        new_dent->data = NULL;
         clear_lock(&new_dent->lock);
         REF_SET(new_dent->ref_count, 0);
+
+        if (new_dent->fs == &fifo_builtin_fs) {
+            /* FIFO pipe, do not try to checkpoint its fs */
+            new_dent->fs = NULL;
+        } else {
+            /* not FIFO, no need to keep data (FIFOs stash internal FDs into data field) */
+            new_dent->data = NULL;
+        }
 
         DO_CP_IN_MEMBER(qstr, new_dent, rel_path);
         DO_CP_IN_MEMBER(qstr, new_dent, name);
 
-        if (dent->fs)
+        if (new_dent->fs)
             DO_CP_MEMBER(mount, dent, new_dent, fs);
 
         if (dent->parent)
@@ -394,6 +389,11 @@ BEGIN_RS_FUNC(dentry) {
 
     if (!create_lock(&dent->lock)) {
         return -ENOMEM;
+    }
+
+    if (!dent->fs) {
+        /* special case of FIFO pipe: use built-in FIFO FS */
+        dent->fs = &fifo_builtin_fs;
     }
 
     /* DEP 6/16/17: I believe the point of this line is to

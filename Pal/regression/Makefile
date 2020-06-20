@@ -1,8 +1,13 @@
 include ../../Scripts/Makefile.configs
 include ../../Scripts/Makefile.rules
 
-CFLAGS	+= -fno-builtin -nostdlib \
-	  -I../include/pal -I../include/lib -I../src
+CFLAGS	+= -Wp,-U_FORTIFY_SOURCE -fno-builtin -nostdlib \
+	  -I../src \
+	  -I../include \
+	  -I../include/pal \
+	  -I../include/lib \
+	  -I../include/arch/$(ARCH) \
+	  -I../include/arch/$(ARCH)/$(PAL_HOST)
 
 preloads = \
 	Preload1.so \
@@ -10,34 +15,65 @@ preloads = \
 
 executables = \
 	..Bootstrap \
-	Attestation \
 	AtomicMath \
+	AttestationReport \
 	AvxDisable \
+	avl_tree_test \
 	Bootstrap \
 	Bootstrap2 \
 	Bootstrap3 \
 	Bootstrap7 \
 	Directory \
 	Event \
+	Event2 \
 	Exception \
+	Exception2 \
 	Exit \
+	Failure \
 	File \
+	File2 \
+	HelloWorld \
 	Hex \
 	Memory \
 	Misc \
+	Pie \
 	Pipe \
 	Process \
 	Process2 \
 	Process3 \
+	Process4 \
+	Segment \
+	Select \
 	Semaphore \
 	SendHandle \
+	Sleep \
 	Socket \
 	Symbols \
+	Tcp \
 	Thread \
 	Thread2 \
+	Udp \
+	Wait \
+	Yield \
 	normalize_path
 
-manifests   = manifest $(patsubst %.manifest.template,%.manifest,$(wildcard *.manifest.template))
+manifests = \
+	manifest \
+	AvxDisable.manifest \
+	Bootstrap2.manifest \
+	Bootstrap3.manifest \
+	Bootstrap4.manifest \
+	Bootstrap5.manifest \
+	Bootstrap6.manifest \
+	Bootstrap7.manifest \
+	File.manifest \
+	Process.manifest \
+	Process2.manifest \
+	Process3.manifest \
+	SendHandle.manifest \
+	Thread2.manifest \
+	Thread2_exitless.manifest \
+	nonelf_binary.manifest
 
 target = $(executables) $(manifests)
 
@@ -47,26 +83,15 @@ pal_lib = ../../Runtime/libpal-$(PAL_HOST).so
 
 RUNTIME_DIR = $(CURDIR)/../../Runtime
 
-ifneq ($(findstring x86_64,$(SYS))$(findstring linux,$(SYS)),x86_64linux)
-$(error unsupported platform. $(SYS))
-endif
-
 .PHONY: all
 all: $(target) $(call expand_target_to_sig,$(target)) $(call expand_target_to_sgx,$(target)) $(preloads)
 
 .PHONY: sgx-tokens
 sgx-tokens: $(call expand_target_to_token,$(target))
 
-# To enable tests for remote attestation, please provide RA_CLIENT_SPID and RA_CLIENT_KEY
-# in the environment variables.
-# To obtain a SPID, register in the Intel API portal:
-# https://api.portal.trustedservices.intel.com/EPID-attestation
-
 manifest_rules = \
-	-e 's:\$$(PAL):$(abspath ../../Runtime/pal_loader):g' \
 	-e 's:\$$(PWD):$(shell pwd)/:g' \
 	-e 's:\$$(RA_CLIENT_SPID):$(RA_CLIENT_SPID):g' \
-	-e 's:\$$(RA_CLIENT_KEY):$(RA_CLIENT_KEY):g' \
 	-e 's:\$$(RA_CLIENT_LINKABLE):$(if $(RA_CLIENT_LINKABLE),$(RA_CLIENT_LINKABLE),0):g'
 
 .PHONY: crt_init-recurse
@@ -77,6 +102,8 @@ crt_init-recurse:
 	@true
 
 CFLAGS-AvxDisable += -mavx
+CFLAGS-Pie = -fPIC -pie
+CFLAGS-AttestationReport = -I../src/host/Linux-SGX
 
 # workaround: File.manifest.template has strange reference
 # to ../regression/File

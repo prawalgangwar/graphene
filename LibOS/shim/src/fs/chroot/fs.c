@@ -1,18 +1,5 @@
-/* Copyright (C) 2014 Stony Brook University
-   This file is part of Graphene Library OS.
-
-   Graphene Library OS is free software: you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public License
-   as published by the Free Software Foundation, either version 3 of the
-   License, or (at your option) any later version.
-
-   Graphene Library OS is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
+/* Copyright (C) 2014 Stony Brook University */
 
 /*
  * fs.c
@@ -20,30 +7,25 @@
  * This file contains codes for implementation of 'chroot' filesystem.
  */
 
-#include <shim_internal.h>
-#include <shim_thread.h>
-#include <shim_handle.h>
-#include <shim_vma.h>
-#include <shim_fs.h>
-#include <shim_utils.h>
-#include <shim_profile.h>
-
-#include <pal.h>
-#include <pal_error.h>
-
-#include <errno.h>
-
-#include <linux/stat.h>
-#include <linux/fcntl.h>
+// FIXME: Sorting these includes causes a bunch of "error: ‘S_IFREG’ undeclared" errors.
+#include "shim_flags_conv.h"
+#include "shim_internal.h"
+#include "shim_thread.h"
+#include "shim_handle.h"
+#include "shim_vma.h"
+#include "shim_fs.h"
+#include "shim_utils.h"
+#include "pal.h"
+#include "pal_error.h"
 
 #include <asm/fcntl.h>
 #include <asm/mman.h>
 #include <asm/unistd.h>
-#include <asm/prctl.h>
+#include <errno.h>
+#include <linux/fcntl.h>
+#include <linux/stat.h>
 
 #define URI_MAX_SIZE    STR_SIZE
-
-#define TTY_FILE_MODE   0666
 
 #define FILE_BUFMAP_SIZE (PAL_CB(alloc_align) * 4)
 #define FILE_BUF_SIZE (PAL_CB(alloc_align))
@@ -223,7 +205,7 @@ static int __query_attr (struct shim_dentry * dent,
     if (pal_handle ?
         !DkStreamAttributesQueryByHandle(pal_handle, &pal_attr) :
         !DkStreamAttributesQuery(qstrgetstr(&data->host_uri), &pal_attr))
-        return -PAL_ERRNO;
+        return -PAL_ERRNO();
 
     /* need to correct the data type */
     if (data->type == FILE_UNKNOWN)
@@ -385,11 +367,8 @@ static int chroot_lookup (struct shim_dentry * dent)
     return query_dentry(dent, NULL, NULL, NULL);
 }
 
-static int __chroot_open (struct shim_dentry * dent,
-                          const char * uri, int flags, mode_t mode,
-                          struct shim_handle * hdl,
-                          struct shim_file_data * data)
-{
+static int __chroot_open(struct shim_dentry* dent, const char* uri, int flags, mode_t mode,
+                         struct shim_handle* hdl, struct shim_file_data* data) {
     int ret = 0;
 
     if (!uri) {
@@ -397,13 +376,12 @@ static int __chroot_open (struct shim_dentry * dent,
     }
 
     int version = atomic_read(&data->version);
-    int oldmode = flags & O_ACCMODE;
+    int oldmode = LINUX_OPEN_FLAGS_TO_PAL_ACCESS(flags);
     int accmode = oldmode;
-    int creat   = flags & PAL_CREATE_MASK;
-    int option  = flags & PAL_OPTION_MASK;
+    int create  = LINUX_OPEN_FLAGS_TO_PAL_CREATE(flags);
+    int options = LINUX_OPEN_FLAGS_TO_PAL_OPTIONS(flags);
 
-    if ((data->type == FILE_REGULAR || data->type == FILE_UNKNOWN)
-        && accmode == O_WRONLY)
+    if ((data->type == FILE_REGULAR || data->type == FILE_UNKNOWN) && accmode == O_WRONLY)
         accmode = O_RDWR;
 
     PAL_HANDLE palhdl;
@@ -411,20 +389,19 @@ static int __chroot_open (struct shim_dentry * dent,
     if (hdl && hdl->pal_handle) {
         palhdl = hdl->pal_handle;
     } else {
-        palhdl = DkStreamOpen(uri, accmode, mode, creat, option);
+        palhdl = DkStreamOpen(uri, accmode, mode, create, options);
 
         if (!palhdl) {
-            if (PAL_NATIVE_ERRNO == PAL_ERROR_DENIED &&
-                accmode != oldmode)
-                palhdl = DkStreamOpen(uri, oldmode, mode, creat, option);
+            if (PAL_NATIVE_ERRNO() == PAL_ERROR_DENIED && accmode != oldmode)
+                palhdl = DkStreamOpen(uri, oldmode, mode, create, options);
 
             if (!palhdl)
-                return -PAL_ERRNO;
+                return -PAL_ERRNO();
         }
 
         /* If DENTRY_LISTED is set on the parent dentry, list_directory_dentry() will not update
          * dent's ino, so ino will be actively updated here. */
-        if (creat)
+        if (create)
             chroot_update_ino(dent);
     }
 
@@ -448,11 +425,9 @@ static int __chroot_open (struct shim_dentry * dent,
     return ret;
 }
 
-static int chroot_open (struct shim_handle * hdl, struct shim_dentry * dent,
-                        int flags)
-{
+static int chroot_open(struct shim_handle* hdl, struct shim_dentry* dent, int flags) {
     int ret = 0;
-    struct shim_file_data * data;
+    struct shim_file_data* data;
     if ((ret = try_create_data(dent, NULL, 0, &data)) < 0)
         return ret;
 
@@ -473,7 +448,6 @@ static int chroot_open (struct shim_handle * hdl, struct shim_dentry * dent,
     hdl->type       = TYPE_FILE;
     file->marker    = (flags & O_APPEND) ? size : 0;
     file->size      = size;
-    file->buf_type  = (data->type == FILE_REGULAR) ? FILEBUF_MAP : FILEBUF_NONE;
     hdl->flags      = flags;
     hdl->acc_mode   = ACC_MODE(flags & O_ACCMODE);
     qstrcopy(&hdl->uri, &data->host_uri);
@@ -503,7 +477,6 @@ static int chroot_creat (struct shim_handle * hdl, struct shim_dentry * dir,
     hdl->type       = TYPE_FILE;
     file->marker    = (flags & O_APPEND) ? size : 0;
     file->size      = size;
-    file->buf_type  = (data->type == FILE_REGULAR) ? FILEBUF_MAP : FILEBUF_NONE;
     hdl->flags      = flags;
     hdl->acc_mode   = ACC_MODE(flags & O_ACCMODE);
     qstrcopy(&hdl->uri, &data->host_uri);
@@ -534,7 +507,7 @@ static int chroot_mkdir (struct shim_dentry * dir, struct shim_dentry * dent,
             return ret;
     }
 
-    ret = __chroot_open(dent, NULL, O_CREAT|O_EXCL, mode, NULL, data);
+    ret = __chroot_open(dent, NULL, O_CREAT | O_EXCL, mode, NULL, data);
 
     /* Increment the parent's link count */
     struct shim_file_data *parent_data = FILE_DENTRY_DATA(dir);
@@ -594,7 +567,7 @@ static void chroot_update_size(struct shim_handle* hdl, struct shim_file_handle*
                 file->size = size;
                 break;
             }
-        } while ((off_t)atomic_cmpxchg(&data->size, size, file->size) != size);
+        } while (!atomic_cmpxchg(&data->size, size, file->size));
     }
 }
 
@@ -617,7 +590,7 @@ static int chroot_hstat (struct shim_handle * hdl, struct stat * stat)
             stat->st_dev  = mdata ? (dev_t) mdata->ino_base : 0;
             stat->st_ino  = dent ? (ino_t) dent->ino : 0;
             stat->st_size = file->size;
-            stat->st_mode |= (file->buf_type == FILEBUF_MAP) ? S_IFREG : S_IFCHR;
+            stat->st_mode |= (file->type == FILE_REGULAR) ? S_IFREG : S_IFCHR;
         }
 
         return 0;
@@ -626,188 +599,16 @@ static int chroot_hstat (struct shim_handle * hdl, struct stat * stat)
     return query_dentry(hdl->dentry, hdl->pal_handle, NULL, stat);
 }
 
-static void chroot_flush_map(struct shim_handle* hdl) {
-    struct shim_file_handle* file = &hdl->info.file;
-
-    if (file->buf_type == FILEBUF_MAP) {
-        lock(&hdl->lock);
-        void* mapbuf = file->mapbuf;
-        size_t mapsize = file->mapsize;
-        file->mapoffset = 0;
-        file->mapbuf = NULL;
-        unlock(&hdl->lock);
-
-        if (mapbuf) {
-            DkStreamUnmap(mapbuf, mapsize);
-
-            if (bkeep_munmap(mapbuf, mapsize, VMA_INTERNAL) < 0)
-                BUG();
-        }
-    }
-}
-
 static int chroot_flush(struct shim_handle* hdl) {
     int ret = DkStreamFlush(hdl->pal_handle);
     if (ret < 0)
         return ret;
-
-    chroot_flush_map(hdl);
     return 0;
 }
 
 static int chroot_close(struct shim_handle* hdl) {
-    chroot_flush_map(hdl);
+    __UNUSED(hdl);
     return 0;
-}
-
-static inline int __map_buffer (struct shim_handle * hdl, size_t size)
-{
-    struct shim_file_handle * file = &hdl->info.file;
-
-    if (file->mapbuf) {
-        if (file->marker >= file->mapoffset &&
-            file->marker + size <= file->mapoffset + file->mapsize)
-            return 0;
-
-        DkStreamUnmap(file->mapbuf, file->mapsize);
-
-        if (bkeep_munmap(file->mapbuf, file->mapsize, VMA_INTERNAL) < 0)
-            BUG();
-
-        file->mapbuf    = NULL;
-        file->mapoffset = 0;
-    }
-
-    /* second, reallocate the buffer */
-    size_t bufsize = file->mapsize ? : FILE_BUFMAP_SIZE;
-    assert(IS_POWER_OF_2(bufsize));
-    off_t  mapoff = ALIGN_DOWN_POW2(file->marker, bufsize);
-    size_t maplen = bufsize;
-    int flags = MAP_FILE | MAP_PRIVATE | VMA_INTERNAL;
-    int prot = PROT_READ;
-
-    if (hdl->acc_mode & MAY_WRITE) {
-        flags = MAP_FILE | MAP_SHARED | VMA_INTERNAL;
-        prot |= PROT_WRITE;
-    }
-
-    while (mapoff + maplen < file->marker + size)
-        maplen *= 2;
-
-    /* Create the bookkeeping before allocating the memory. */
-    void * mapbuf = bkeep_unmapped_any(maplen, prot, flags, mapoff, "filebuf");
-    if (!mapbuf)
-        return -ENOMEM;
-
-    PAL_PTR mapped = DkStreamMap(hdl->pal_handle, mapbuf, PAL_PROT(prot, flags),
-                                 mapoff, maplen);
-
-    if (!mapped) {
-        bkeep_munmap(mapbuf, maplen, flags);
-        return -PAL_ERRNO;
-    }
-
-    assert((void*)mapped == mapbuf);
-
-    file->mapbuf    = mapbuf;
-    file->mapoffset = mapoff;
-    file->mapsize   = maplen;
-
-    return 0;
-}
-
-static ssize_t map_read (struct shim_handle * hdl, void * buf, size_t count)
-{
-    struct shim_file_handle * file = &hdl->info.file;
-    ssize_t ret = 0;
-    lock(&hdl->lock);
-
-    struct shim_file_data * data = FILE_HANDLE_DATA(hdl);
-    off_t size = atomic_read(&data->size);
-
-    if (check_version(hdl) &&
-        file->size < size)
-        file->size = size;
-
-    off_t marker = file->marker;
-
-    if (marker >= file->size) {
-        count = 0;
-        goto out;
-    }
-
-    if ((ret = __map_buffer(hdl, count)) < 0) {
-        unlock(&hdl->lock);
-        return ret;
-    }
-
-    size_t bytes_left;
-    if (!__builtin_sub_overflow(file->size, marker, &bytes_left) && bytes_left < count)
-        count = bytes_left;
-
-    if (count) {
-        memcpy(buf, file->mapbuf + (marker - file->mapoffset), count);
-        file->marker = marker + count;
-    }
-
-out:
-    unlock(&hdl->lock);
-    return count;
-}
-
-static ssize_t map_write (struct shim_handle * hdl, const void * buf, size_t count)
-{
-    struct shim_file_handle * file = &hdl->info.file;
-    ssize_t ret = 0;
-    lock(&hdl->lock);
-
-    struct shim_file_data * data = FILE_HANDLE_DATA(hdl);
-    off_t marker = file->marker;
-
-    off_t new_marker;
-    if (__builtin_add_overflow(marker, count, &new_marker)) {
-        // We can't handle this case reasonably.
-        ret = -EFBIG;
-        goto out;
-    }
-
-    if (new_marker > file->size) {
-        file->size = new_marker;
-
-        PAL_NUM pal_ret = DkStreamWrite(hdl->pal_handle, file->marker, count, (void *) buf, NULL);
-
-        if (pal_ret == PAL_STREAM_ERROR) {
-            ret = -PAL_ERRNO;
-            goto out;
-        }
-
-        if (pal_ret < count) {
-           file->size -= count - pal_ret;
-        }
-
-        chroot_update_size(hdl, file, data);
-
-        if (__builtin_add_overflow(marker, pal_ret, &file->marker)) {
-            // Should never happen. Even if it would, we couldn't recover from this condition.
-            BUG();
-        }
-        ret = (ssize_t) pal_ret;
-        goto out;
-    }
-
-    if ((ret = __map_buffer(hdl, count)) < 0)
-        goto out;
-
-
-    if (count) {
-        memcpy(file->mapbuf + (marker - file->mapoffset), buf, count);
-        file->marker = new_marker;
-    }
-
-    ret = count;
-out:
-    unlock(&hdl->lock);
-    return ret;
 }
 
 static ssize_t chroot_read (struct shim_handle * hdl, void * buf, size_t count)
@@ -834,16 +635,7 @@ static ssize_t chroot_read (struct shim_handle * hdl, void * buf, size_t count)
         goto out;
     }
 
-    if (file->buf_type == FILEBUF_MAP) {
-        ret = map_read(hdl, buf, count);
-        if (ret != -EACCES)
-            goto out;
-
-        lock(&hdl->lock);
-        file->buf_type = FILEBUF_NONE;
-    } else {
-        lock(&hdl->lock);
-    }
+    lock(&hdl->lock);
 
     PAL_NUM pal_ret = DkStreamRead(hdl->pal_handle, file->marker, count, buf, NULL, 0);
     if (pal_ret != PAL_STREAM_ERROR) {
@@ -852,7 +644,7 @@ static ssize_t chroot_read (struct shim_handle * hdl, void * buf, size_t count)
         if (file->type != FILE_TTY && __builtin_add_overflow(file->marker, pal_ret, &file->marker))
             BUG();
     } else {
-        ret = PAL_NATIVE_ERRNO == PAL_ERROR_ENDOFSTREAM ?  0 : -PAL_ERRNO;
+        ret = PAL_NATIVE_ERRNO() == PAL_ERROR_ENDOFSTREAM ?  0 : -PAL_ERRNO();
     }
 
     unlock(&hdl->lock);
@@ -884,16 +676,7 @@ static ssize_t chroot_write (struct shim_handle * hdl, const void * buf, size_t 
         goto out;
     }
 
-    if (hdl->info.file.buf_type == FILEBUF_MAP) {
-        ret = map_write(hdl, buf, count);
-        if (ret != -EACCES)
-            goto out;
-
-        lock(&hdl->lock);
-        file->buf_type = FILEBUF_NONE;
-    } else {
-        lock(&hdl->lock);
-    }
+    lock(&hdl->lock);
 
     PAL_NUM pal_ret = DkStreamWrite(hdl->pal_handle, file->marker, count, (void *) buf, NULL);
     if (pal_ret != PAL_STREAM_ERROR) {
@@ -906,7 +689,7 @@ static ssize_t chroot_write (struct shim_handle * hdl, const void * buf, size_t 
             chroot_update_size(hdl, file, FILE_HANDLE_DATA(hdl));
         }
     } else {
-        ret = PAL_NATIVE_ERRNO == PAL_ERROR_ENDOFSTREAM ?  0 : -PAL_ERRNO;
+        ret = PAL_NATIVE_ERRNO() == PAL_ERROR_ENDOFSTREAM ?  0 : -PAL_ERRNO();
     }
 
     unlock(&hdl->lock);
@@ -921,7 +704,7 @@ static int chroot_mmap (struct shim_handle * hdl, void ** addr, size_t size,
     if (NEED_RECREATE(hdl) && (ret = chroot_recreate(hdl)) < 0)
         return ret;
 
-    int pal_prot = PAL_PROT(prot, flags);
+    int pal_prot = LINUX_PROT_TO_PAL(prot, flags);
 
 #if MAP_FILE == 0
     if (flags & MAP_ANONYMOUS)
@@ -934,7 +717,7 @@ static int chroot_mmap (struct shim_handle * hdl, void ** addr, size_t size,
         (void *) DkStreamMap(hdl->pal_handle, *addr, pal_prot, offset, size);
 
     if (!alloc_addr)
-        return -PAL_ERRNO;
+        return -PAL_ERRNO();
 
     *addr = alloc_addr;
     return 0;
@@ -1053,7 +836,7 @@ static int chroot_readdir(struct shim_dentry* dent, struct shim_dirent** dirent)
 
     pal_hdl = DkStreamOpen(uri, PAL_ACCESS_RDONLY, 0, 0, 0);
     if (!pal_hdl)
-        return -PAL_ERRNO;
+        return -PAL_ERRNO();
 
     buf = malloc(buf_size);
     if (!buf) {
@@ -1065,13 +848,13 @@ static int chroot_readdir(struct shim_dentry* dent, struct shim_dirent** dirent)
         /* DkStreamRead for directory will return as many entries as fits into the buffer. */
         PAL_NUM bytes = DkStreamRead(pal_hdl, 0, buf_size, buf, NULL, 0);
         if (bytes == PAL_STREAM_ERROR) {
-            if (PAL_NATIVE_ERRNO == PAL_ERROR_ENDOFSTREAM) {
+            if (PAL_NATIVE_ERRNO() == PAL_ERROR_ENDOFSTREAM) {
                 /* End of directory listing */
                 ret = 0;
                 break;
             }
 
-            ret = -PAL_ERRNO;
+            ret = -PAL_ERRNO();
             goto out;
         }
         /* Last entry must be null-terminated */
@@ -1186,9 +969,6 @@ static int chroot_checkout (struct shim_handle * hdl)
             hdl->pal_handle = NULL;
     }
 
-    hdl->info.file.mapsize = 0;
-    hdl->info.file.mapoffset = 0;
-    hdl->info.file.mapbuf = NULL;
     return 0;
 }
 
@@ -1224,7 +1004,7 @@ static int chroot_unlink (struct shim_dentry * dir, struct shim_dentry * dent)
 
     PAL_HANDLE pal_hdl = DkStreamOpen(qstrgetstr(&data->host_uri), 0, 0, 0, 0);
     if (!pal_hdl)
-        return -PAL_ERRNO;
+        return -PAL_ERRNO();
 
     DkStreamDelete(pal_hdl, 0);
     DkObjectClose(pal_hdl);
@@ -1268,7 +1048,7 @@ static off_t chroot_poll (struct shim_handle * hdl, int poll_type)
 
     off_t marker = file->marker;
 
-    if (file->buf_type == FILEBUF_MAP) {
+    if (file->type == FILE_REGULAR) {
         ret = poll_type & FS_POLL_WR;
         if ((poll_type & FS_POLL_RD) && file->size > marker)
             ret |= FS_POLL_RD;
@@ -1297,12 +1077,12 @@ static int chroot_rename(struct shim_dentry* old, struct shim_dentry* new) {
 
     PAL_HANDLE pal_hdl = DkStreamOpen(qstrgetstr(&old_data->host_uri), 0, 0, 0, 0);
     if (!pal_hdl) {
-        return -PAL_ERRNO;
+        return -PAL_ERRNO();
     }
 
     if (!DkStreamChangeName(pal_hdl, qstrgetstr(&new_data->host_uri))) {
         DkObjectClose(pal_hdl);
-        return -PAL_ERRNO;
+        return -PAL_ERRNO();
     }
 
     new->mode = new_data->mode = old_data->mode;
@@ -1329,13 +1109,13 @@ static int chroot_chmod (struct shim_dentry * dent, mode_t mode)
 
     PAL_HANDLE pal_hdl = DkStreamOpen(qstrgetstr(&data->host_uri), 0, 0, 0, 0);
     if (!pal_hdl)
-        return -PAL_ERRNO;
+        return -PAL_ERRNO();
 
     PAL_STREAM_ATTR attr = { .share_flags = mode };
 
     if (!DkStreamAttributesSetByHandle(pal_hdl, &attr)) {
         DkObjectClose(pal_hdl);
-        return -PAL_ERRNO;
+        return -PAL_ERRNO();
     }
 
     DkObjectClose(pal_hdl);

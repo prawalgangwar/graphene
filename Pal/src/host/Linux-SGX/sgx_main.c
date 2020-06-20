@@ -3,10 +3,12 @@
 #include <pal_rtld.h>
 #include <hex.h>
 
+#include "debugger/sgx_gdb.h"
+#include "rpc_queue.h"
+#include "sgx_api.h"
+#include "sgx_enclave.h"
 #include "sgx_internal.h"
 #include "sgx_tls.h"
-#include "sgx_enclave.h"
-#include "debugger/sgx_gdb.h"
 
 #include <asm/fcntl.h>
 #include <asm/socket.h>
@@ -231,8 +233,7 @@ int load_enclave_binary (sgx_arch_secs_t * secs, int fd,
     return 0;
 }
 
-int initialize_enclave (struct pal_enclave * enclave)
-{
+static int initialize_enclave(struct pal_enclave* enclave) {
     int ret = 0;
     int                    enclave_image = -1;
     char*                  enclave_uri = NULL;
@@ -297,11 +298,34 @@ int initialize_enclave (struct pal_enclave * enclave)
         enclave->thread_num = 1;
     }
 
+    if (get_config(enclave->config, "sgx.rpc_thread_num", cfgbuf, sizeof(cfgbuf)) > 0) {
+        enclave->rpc_thread_num = parse_int(cfgbuf);
+
+        if (enclave->rpc_thread_num > MAX_RPC_THREADS) {
+            SGX_DBG(DBG_E, "Too many RPC threads specified\n");
+            ret = -EINVAL;
+            goto out;
+        }
+
+        if (enclave->rpc_thread_num && enclave->thread_num > RPC_QUEUE_SIZE) {
+            SGX_DBG(DBG_E, "Too many threads for exitless feature (more than capacity of RPC queue)\n");
+            ret = -EINVAL;
+            goto out;
+        }
+    } else {
+        enclave->rpc_thread_num = 0;  /* by default, do not use exitless feature */
+    }
+
     if (get_config(enclave->config, "sgx.static_address", cfgbuf, sizeof(cfgbuf)) > 0 && cfgbuf[0] == '1') {
         enclave->baseaddr = ALIGN_DOWN_POW2(heap_min, enclave->size);
     } else {
         enclave->baseaddr = ENCLAVE_HIGH_ADDRESS;
         heap_min = 0;
+    }
+
+    if (get_config(enclave->config, "sgx.print_stats", cfgbuf, sizeof(cfgbuf)) > 0 &&
+            cfgbuf[0] == '1') {
+        g_sgx_print_stats = true;
     }
 
     ret = read_enclave_token(enclave->token, &enclave_token);
@@ -377,7 +401,7 @@ int initialize_enclave (struct pal_enclave * enclave)
     areas[area_num] = (struct mem_area) {
         .desc = "tcs", .skip_eextend = false, .fd = -1,
         .is_binary = false, .addr = 0, .size = enclave->thread_num * g_page_size,
-        .prot = 0, .type = SGX_PAGE_TCS
+        .prot = PROT_READ | PROT_WRITE, .type = SGX_PAGE_TCS
     };
     struct mem_area* tcs_area = &areas[area_num++];
 
@@ -599,8 +623,9 @@ int initialize_enclave (struct pal_enclave * enclave)
         dbg->pid = INLINE_SYSCALL(getpid, 0);
         dbg->base = enclave->baseaddr;
         dbg->size = enclave->size;
-        dbg->ssaframesize = enclave->ssaframesize;
-        dbg->aep  = async_exit_pointer;
+        dbg->ssaframesize   = enclave->ssaframesize;
+        dbg->aep            = async_exit_pointer;
+        dbg->eresume        = eresume_pointer;
         dbg->thread_tids[0] = dbg->pid;
         for (int i = 0 ; i < MAX_DBG_THREADS ; i++)
             dbg->tcs_addrs[i] = tcs_addrs[i];
@@ -616,28 +641,9 @@ out:
     return ret;
 }
 
-static unsigned long randval = 0;
-
-void getrand (void * buffer, size_t size)
-{
-    size_t bytes = 0;
-
-    while (bytes + sizeof(uint64_t) <= size) {
-        *(uint64_t*) (buffer + bytes) = randval;
-        randval = hash64(randval);
-        bytes += sizeof(uint64_t);
-    }
-
-    if (bytes < size) {
-        memcpy(buffer + bytes, &randval, size - bytes);
-        randval = hash64(randval);
-    }
-}
-
 static void create_instance (struct pal_sec * pal_sec)
 {
-    PAL_NUM id;
-    getrand(&id, sizeof(id));
+    PAL_NUM id = ((uint64_t)rdrand() << 32) | rdrand();
     snprintf(pal_sec->pipe_prefix, sizeof(pal_sec->pipe_prefix), "/graphene/%016lx/", id);
     pal_sec->instance_id = id;
 }
@@ -719,7 +725,7 @@ static int get_cpu_count(void) {
         if (ptr == end)
             break;
 
-        if (*end == '\0' || *end == ',') {
+        if (*end == '\0' || *end == ',' || *end == '\n') {
             /* single CPU index, count as one more CPU */
             cpu_count++;
         } else if (*end == '-') {
@@ -748,9 +754,9 @@ static int load_enclave (struct pal_enclave * enclave,
 {
     struct pal_sec * pal_sec = &enclave->pal_sec;
     int ret;
-    struct timeval tv;
 
 #if PRINT_ENCLAVE_STAT == 1
+    struct timeval tv;
     INLINE_SYSCALL(gettimeofday, 2, &tv, NULL);
     pal_sec->start_time = tv.tv_sec * 1000000UL + tv.tv_usec;
 #endif
@@ -761,9 +767,6 @@ static int load_enclave (struct pal_enclave * enclave,
 
     if (!is_wrfsbase_supported())
         return -EPERM;
-
-    INLINE_SYSCALL(gettimeofday, 2, &tv, NULL);
-    randval = tv.tv_sec * 1000000UL + tv.tv_usec;
 
     pal_sec->pid = INLINE_SYSCALL(getpid, 0);
     pal_sec->uid = INLINE_SYSCALL(getuid, 0);
@@ -870,9 +873,9 @@ static int load_enclave (struct pal_enclave * enclave,
                                     O_RDONLY|O_CLOEXEC, 0);
     if (IS_ERR(enclave->token)) {
         SGX_DBG(DBG_E, "Cannot open token \'%s\'. Use \'"
-                PAL_FILE("pal-sgx-get-token")
-                "\' on the runtime host or run \'make SGX=1 sgx-tokens\' "
-                "in the Graphene source to create the token file.\n",
+                PAL_FILE("host/Linux-SGX/signer/pal-sgx-get-token")
+                "\' on the runtime host or run \'make SGX=1 sgx-tokens\' in the Graphene source to "
+                "create the token file.\n",
                 token_uri);
         free(token_uri);
         return -EINVAL;
@@ -899,9 +902,18 @@ static int load_enclave (struct pal_enclave * enclave,
     if (ret < 0)
         return ret;
 
-    if (get_config(enclave->config, "sgx.ra_client_key", cfgbuf, sizeof(cfgbuf)) > 0) {
-        /* initialize communication with AESM enclave only if app requests remote attestation */
-        ret = init_aesm_targetinfo(&pal_sec->aesm_targetinfo);
+    if (get_config(enclave->config, "sgx.remote_attestation", cfgbuf, sizeof(cfgbuf)) < 0 &&
+            (get_config(enclave->config, "sgx.ra_client_spid", cfgbuf, sizeof(cfgbuf)) > 0 ||
+             get_config(enclave->config, "sgx.ra_client_linkable", cfgbuf, sizeof(cfgbuf)) > 0)) {
+        SGX_DBG(DBG_E, "Detected EPID remote attestation parameters \'ra_client_spid\' and/or "
+                "\'ra_client_linkable\' in the manifest but no \'remote_attestation\' parameter. "
+                "Please add \'sgx.remote_attestation = 1\' to the manifest.\n");
+        return -EINVAL;
+    }
+
+    if (get_config(enclave->config, "sgx.remote_attestation", cfgbuf, sizeof(cfgbuf)) > 0) {
+        /* initialize communication with Quoting Enclave only if app requests attestation */
+        ret = init_quoting_enclave_targetinfo(&pal_sec->qe_targetinfo);
         if (ret < 0)
             return ret;
     }
@@ -921,12 +933,6 @@ static int load_enclave (struct pal_enclave * enclave,
     /* start running trusted PAL */
     ecall_enclave_start(args, args_size, env, env_size);
 
-#if PRINT_ENCLAVE_STAT == 1
-    PAL_NUM exit_time = 0;
-    INLINE_SYSCALL(gettimeofday, 2, &tv, NULL);
-    exit_time = tv.tv_sec * 1000000UL + tv.tv_usec;
-#endif
-
     unmap_tcs();
     INLINE_SYSCALL(munmap, 2, alt_stack, ALT_STACK_SIZE);
     INLINE_SYSCALL(exit, 0);
@@ -937,7 +943,7 @@ static int load_enclave (struct pal_enclave * enclave,
  * each stack page (Linux dynamically grows the stack of the main thread but gets confused with
  * huge-jump stack accesses coming from within the enclave). Note that other, non-main threads
  * are created manually via clone(.., THREAD_STACK_SIZE, ..) and thus do not need this hack. */
-static void __attribute__ ((noinline)) force_linux_to_grow_stack() {
+static void __attribute__ ((noinline)) force_linux_to_grow_stack(void) {
     char dummy[THREAD_STACK_SIZE];
     for (uint64_t i = 0; i < sizeof(dummy); i += PRESET_PAGESIZE) {
         /* touch each page on the stack just to make it is not optimized away */
@@ -947,11 +953,9 @@ static void __attribute__ ((noinline)) force_linux_to_grow_stack() {
     }
 }
 
-int main (int argc, char ** argv, char ** envp)
-{
-    char * manifest_uri = NULL;
-    char * exec_uri = NULL;
-    const char * pal_loader = argv[0];
+int main(int argc, char* argv[], char* envp[]) {
+    char* manifest_uri = NULL;
+    char* exec_uri = NULL;
     int fd = -1;
     int ret = 0;
     bool exec_uri_inferred = false; // Handle the case where the exec uri is
@@ -960,28 +964,29 @@ int main (int argc, char ** argv, char ** envp)
 
     force_linux_to_grow_stack();
 
-    argc--;
-    argv++;
+    if (argc < 3)
+        goto usage;
 
-    int is_child = sgx_init_child_process(&pal_enclave.pal_sec);
-    if (is_child < 0) {
-        ret = is_child;
-        goto out;
+    // Are we the first in this Graphene's namespace?
+    bool first_process = !strcmp_static(argv[1], "init");
+    if (!first_process && strcmp_static(argv[1], "child")) {
+        goto usage;
     }
 
-    if (!is_child) {
-        /* occupy PROC_INIT_FD so no one will use it */
-        INLINE_SYSCALL(dup2, 2, 0, PROC_INIT_FD);
-
-        if (!argc)
+    if (first_process) {
+        /* We're the first process created. */
+        if (argc < 3) {
             goto usage;
-
-        if (!strcmp_static(argv[0], URI_PREFIX_FILE)) {
-            exec_uri = alloc_concat(argv[0], -1, NULL, -1);
-        } else {
-            exec_uri = alloc_concat(URI_PREFIX_FILE, -1, argv[0], -1);
         }
+
+        exec_uri = alloc_concat(URI_PREFIX_FILE, -1, argv[2], -1);
     } else {
+        /* We're one of the children spawned to host new processes started inside Graphene.
+         * We'll receive our argv and config via IPC. */
+        int parent_pipe_fd = atoi(argv[2]);
+        ret = sgx_init_child_process(parent_pipe_fd, &pal_enclave.pal_sec);
+        if (ret < 0)
+            goto out;
         exec_uri = alloc_concat(pal_enclave.pal_sec.exec_name, -1, NULL, -1);
     }
 
@@ -993,7 +998,6 @@ int main (int argc, char ** argv, char ** envp)
     fd = INLINE_SYSCALL(open, 3, exec_uri + URI_PREFIX_FILE_LEN, O_RDONLY|O_CLOEXEC, 0);
     if (IS_ERR(fd)) {
         SGX_DBG(DBG_E, "Input file not found: %s\n", exec_uri);
-        ret = fd;
         goto usage;
     }
 
@@ -1079,14 +1083,21 @@ int main (int argc, char ** argv, char ** envp)
      * continuous we know that we are running on Linux, which does this. This
      * saves us creating a copy of all argv and envp strings.
      */
-    char * args = argv[0];
-    size_t args_size = argc > 0 ? (argv[argc - 1] - argv[0]) + strlen(argv[argc - 1]) + 1: 0;
+    char* args;
+    size_t args_size;
+    if (first_process) {
+        args = argv[2];
+        args_size = argc > 2 ? (argv[argc - 1] - args) + strlen(argv[argc - 1]) + 1 : 0;
+    } else {
+        args = argv[3];
+        args_size = argc > 3 ? (argv[argc - 1] - args) + strlen(argv[argc - 1]) + 1 : 0;
+    }
 
     int envc = 0;
     while (envp[envc] != NULL) {
         envc++;
     }
-    char * env = envp[0];
+    char* env = envp[0];
     size_t env_size = envc > 0 ? (envp[envc - 1] - envp[0]) + strlen(envp[envc - 1]) + 1: 0;
 
     ret = load_enclave(&pal_enclave, manifest_fd, manifest_uri, exec_uri, args, args_size, env, env_size,
@@ -1106,8 +1117,13 @@ out:
 
     return ret;
 
-usage:
-    SGX_DBG(DBG_E, "USAGE: %s [executable|manifest] args ...\n", pal_loader);
-    ret = -EINVAL;
+usage:;
+    const char* self = argv[0] ? argv[0] : "<this program>";
+    printf("USAGE:\n"
+           "\tFirst process: %s init [<executable>|<manifest>] args...\n"
+           "\tChildren:      %s child <parent_pipe_fd> args...\n",
+           self, self);
+    printf("This is an internal interface. Use pal_loader to launch applications in Graphene.\n");
+    ret = 1;
     goto out;
 }

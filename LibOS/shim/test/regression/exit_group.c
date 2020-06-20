@@ -1,3 +1,4 @@
+#define _XOPEN_SOURCE 700
 #include <linux/unistd.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -14,7 +15,7 @@ pthread_barrier_t barrier;
 /* Test the process exit logic in Graphene. Multiple threads race to execute exit()/exit_group().
  * Expected return code is 0 .. 4, depending on which thread wins. */
 
-void* inc(void* arg) {
+static void* inc(void* arg) {
     int a = counter++;
     pthread_barrier_wait(&barrier);
     exit(a);

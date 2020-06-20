@@ -31,10 +31,26 @@ pipeline {
                            cd linux-sgx-driver
                            git checkout sgx_driver_1.9
                            make
+
+                           cd /opt/intel
+                           git clone https://github.com/intel/SGXDataCenterAttestationPrimitives.git
+                           cd SGXDataCenterAttestationPrimitives
+                           git checkout DCAP_1.6
+                           # no need to build, we only need the SGX header file (sgx_oot.h)
+                        '''
+                        sh '''
+                            # test the build with the DCAP driver v1.6 and clean up afterwards
+                            cd Pal/src/host/Linux-SGX/sgx-driver
+                            ISGX_DRIVER_PATH=/opt/intel/SGXDataCenterAttestationPrimitives/driver/linux make
+                            cd ../../../../../
+                            make -j 8 SGX=1 WERROR=1
+                            make -j 8 SGX=1 clean
+                            cd Pal/src/host/Linux-SGX/sgx-driver
+                            make distclean
                         '''
                         sh '''
                             cd Pal/src/host/Linux-SGX/sgx-driver
-                            ISGX_DRIVER_PATH=/opt/intel/linux-sgx-driver ISGX_DRIVER_VERSION=1.9 make
+                            ISGX_DRIVER_PATH=/opt/intel/linux-sgx-driver make
                         '''
                         sh '''
                             make -j 8 SGX=1 WERROR=1
@@ -45,49 +61,42 @@ pipeline {
                     steps {
                         timeout(time: 5, unit: 'MINUTES') {
                             sh '''
-                                cd LibOS/shim/test/apps/python-simple
+                                cd Examples/python-simple
                                 PYTHONVERSION=python3.6 make SGX=1
                                 PYTHONVERSION=python3.6 make SGX=1 check
                             '''
                         }
                         timeout(time: 5, unit: 'MINUTES') {
                             sh '''
-                                cd LibOS/shim/test/apps/python-scipy-insecure
+                                cd Examples/python-scipy-insecure
                                 PYTHONVERSION=python3.6 make SGX=1
                                 PYTHONVERSION=python3.6 make SGX=1 check
                             '''
                         }
                         timeout(time: 5, unit: 'MINUTES') {
                             sh '''
-                                cd LibOS/shim/test/apps/bash
+                                cd Examples/bash
                                 make SGX=1 all
                                 make SGX=1 regression
                            '''
                         }
                         timeout(time: 5, unit: 'MINUTES') {
                             sh '''
-                                cd LibOS/shim/test/apps/curl
+                                cd Examples/curl
                                 make SGX=1 all
                                 make SGX=1 check
                            '''
                         }
                         timeout(time: 10, unit: 'MINUTES') {
                             sh '''
-                                cd LibOS/shim/test/apps/gcc
+                                cd Examples/gcc
                                 make SGX=1 all
                                 make SGX=1 check
                            '''
                         }
                         timeout(time: 15, unit: 'MINUTES') {
                             sh '''
-                                cd LibOS/shim/test/apps/lmbench
-                                make SGX=1 all
-                                make SGX=1 test N_RUNS=1 ENOUGH=100
-                            '''
-                        }
-                        timeout(time: 15, unit: 'MINUTES') {
-                            sh '''
-                                cd LibOS/shim/test/apps/redis
+                                cd Examples/redis
                                 make SGX=1
                                 make SGX=1 start-graphene-server &
                                 sleep 30
@@ -96,7 +105,7 @@ pipeline {
                         }
                         timeout(time: 15, unit: 'MINUTES') {
                             sh '''
-                                cd LibOS/shim/test/apps/lighttpd
+                                cd Examples/lighttpd
                                 make SGX=1
                                 make SGX=1 start-graphene-server &
                                 sleep 10
@@ -105,7 +114,7 @@ pipeline {
                         }
                         timeout(time: 15, unit: 'MINUTES') {
                             sh '''
-                                cd LibOS/shim/test/apps/nginx
+                                cd Examples/nginx
                                 make SGX=1
                                 make SGX=1 start-graphene-server &
                                 sleep 30
@@ -114,12 +123,38 @@ pipeline {
                         }
                         timeout(time: 25, unit: 'MINUTES') {
                             sh '''
-                                cd LibOS/shim/test/apps/apache
+                                cd Examples/apache
                                 make SGX=1
                                 make SGX=1 start-graphene-server &
                                 sleep 30
                                 LOOP=1 CONCURRENCY_LIST="1 32" ./benchmark-http.sh 127.0.0.1:8001
                                 LOOP=1 CONCURRENCY_LIST="1 32" ./benchmark-http.sh https://127.0.0.1:8443
+                            '''
+                        }
+                        timeout(time: 5, unit: 'MINUTES') {
+                            sh '''
+                                cd Examples/blender
+                                make SGX=1
+                                make SGX=1 check
+                           '''
+                        }
+                        timeout(time: 5, unit: 'MINUTES') {
+                            sh '''
+                                cd Examples/ra-tls-mbedtls
+                                if [ "${ra_client_spid}" != "" ] && [ "${ra_client_key}" != "" ]; \
+                                then \
+                                    make SGX=1 check_epid RA_CLIENT_SPID=${ra_client_spid} \
+                                                          RA_TLS_EPID_API_KEY=${ra_client_key} \
+                                                          RA_CLIENT_LINKABLE=0 \
+                                                          RA_TLS_ALLOW_OUTDATED_TCB_INSECURE=1; \
+                                    make SGX=1 check_epid_fail RA_CLIENT_SPID=${ra_client_spid} \
+                                                               RA_TLS_EPID_API_KEY=${ra_client_key} \
+                                                               RA_CLIENT_LINKABLE=0 \
+                                                               RA_TLS_ALLOW_OUTDATED_TCB_INSECURE=1; \
+                                else \
+                                    echo "Failure: no ra_client_spid and/or ra_client_key!"; \
+                                    exit 1; \
+                                fi
                             '''
                         }
                         sh '''
@@ -131,23 +166,24 @@ pipeline {
                            rm Pal/src/host/Linux-SGX/signer/enclave-key.pem
                            make SGX=1 distclean
 
-                           make -C LibOS/shim/test/apps/python-simple SGX=1 clean
-                           make -C LibOS/shim/test/apps/python-scipy-insecure SGX=1 clean
-                           make -C LibOS/shim/test/apps/bash SGX=1 clean
-                           make -C LibOS/shim/test/apps/curl SGX=1 clean
-                           make -C LibOS/shim/test/apps/gcc SGX=1 clean
-                           make -C LibOS/shim/test/apps/lmbench SGX=1 distclean
-                           make -C LibOS/shim/test/apps/redis SGX=1 distclean
-                           make -C LibOS/shim/test/apps/lighttpd SGX=1 distclean
-                           make -C LibOS/shim/test/apps/nginx SGX=1 distclean
-                           make -C LibOS/shim/test/apps/apache SGX=1 distclean
+                           make -C Examples/python-simple SGX=1 clean
+                           make -C Examples/python-scipy-insecure SGX=1 clean
+                           make -C Examples/bash SGX=1 clean
+                           make -C Examples/curl SGX=1 clean
+                           make -C Examples/gcc SGX=1 distclean
+                           make -C Examples/redis SGX=1 distclean
+                           make -C Examples/lighttpd SGX=1 distclean
+                           make -C Examples/nginx SGX=1 distclean
+                           make -C Examples/apache SGX=1 distclean
+                           make -C Examples/blender SGX=1 distclean
+                           make -C Examples/ra-tls-mbedtls SGX=1 distclean
 
                            # Currently used release of LTP contains broken symlinks under
                            # utils/ffsb-6.0-rc2/ (config.guess and config.sub); without explicit
                            # rm of these symlinks, the clean-check utility fails. We should
                            # update to newer release of LTP where this issue will be fixed.
-                           rm -rf /tmp/graphene-sgx-18.04-apps.clean-check.clean/LibOS/shim/test/apps/ltp/src
-                           rm -rf LibOS/shim/test/apps/ltp/src
+                           rm -rf /tmp/graphene-sgx-18.04-apps.clean-check.clean/LibOS/shim/test/ltp/src
+                           rm -rf LibOS/shim/test/ltp/src
 
                            ./Scripts/clean-check
                         '''

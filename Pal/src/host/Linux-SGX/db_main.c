@@ -1,18 +1,5 @@
-/* Copyright (C) 2014 Stony Brook University
-   This file is part of Graphene Library OS.
-
-   Graphene Library OS is free software: you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public License
-   as published by the Free Software Foundation, either version 3 of the
-   License, or (at your option) any later version.
-
-   Graphene Library OS is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
+/* Copyright (C) 2014 Stony Brook University */
 
 /*
  * db_main.c
@@ -21,18 +8,18 @@
  * processes environment, arguments and manifest.
  */
 
-#include "pal_defs.h"
-#include "pal_linux_defs.h"
+#include "api.h"
 #include "pal.h"
+#include "pal_debug.h"
+#include "pal_defs.h"
+#include "pal_error.h"
 #include "pal_internal.h"
 #include "pal_linux.h"
-#include "pal_debug.h"
-#include "pal_error.h"
+#include "pal_linux_defs.h"
 #include "pal_security.h"
-#include "api.h"
 
-#include <asm/mman.h>
 #include <asm/ioctls.h>
+#include <asm/mman.h>
 #include <elf/elf.h>
 #include <sysdeps/generic/ldsodefs.h>
 
@@ -45,25 +32,29 @@
 struct pal_linux_state linux_state;
 struct pal_sec pal_sec;
 
-size_t g_page_size = PRESET_PAGESIZE;
+PAL_SESSION_KEY g_master_key = {0};
 
-unsigned long _DkGetPagesize (void)
-{
-    return g_page_size;
-}
+size_t g_page_size = PRESET_PAGESIZE;
 
 unsigned long _DkGetAllocationAlignment (void)
 {
     return g_page_size;
 }
 
-void _DkGetAvailableUserAddressRange (PAL_PTR * start, PAL_PTR * end,
-                                      PAL_PTR * hole_start, PAL_PTR * hole_end)
-{
-    *start = (PAL_PTR) pal_sec.heap_min;
-    *end = (PAL_PTR) get_reserved_pages(NULL, g_page_size);
-    *hole_start = SATURATED_P_SUB(pal_sec.exec_addr, MEMORY_GAP, *start);
-    *hole_end = SATURATED_P_ADD(pal_sec.exec_addr + pal_sec.exec_size, MEMORY_GAP, *end);
+void _DkGetAvailableUserAddressRange(PAL_PTR* start, PAL_PTR* end, PAL_NUM* gap) {
+    *start = (PAL_PTR)pal_sec.heap_min;
+    *end   = (PAL_PTR)get_enclave_heap_top();
+
+    /* FIXME: hack to keep some heap for internal PAL objects allocated at runtime (recall that
+     * LibOS does not keep track of PAL memory, so without this hack it could overwrite internal
+     * PAL memory). This hack is probabilistic and brittle. */
+    *end = SATURATED_P_SUB(*end, 2 * 1024 * g_page_size, *start);  /* 8MB reserved for PAL stuff */
+    if (*end <= *start) {
+        SGX_DBG(DBG_E, "Not enough enclave memory, please increase enclave size!\n");
+        ocall_exit(1, /*is_exitgroup=*/true);
+    }
+
+    *gap = MEMORY_GAP;
 }
 
 PAL_NUM _DkGetProcessId (void)
@@ -80,13 +71,7 @@ PAL_NUM _DkGetHostId (void)
 #include "dynamic_link.h"
 #include <asm/errno.h>
 
-void setup_pal_map (struct link_map * map);
 static struct link_map pal_map;
-
-void init_untrusted_slab_mgr(void);
-int init_enclave(void);
-int init_enclave_key(void);
-int init_child_process(PAL_HANDLE* parent_handle);
 
 /*
  * Creates a dummy file handle with the given name.
@@ -116,7 +101,6 @@ static PAL_HANDLE setup_dummy_file_handle (const char * name)
     handle->file.realpath = path;
 
     handle->file.total  = 0;
-    handle->file.offset = 0;
     handle->file.stubs  = NULL;
 
     return handle;
@@ -136,7 +120,7 @@ static int loader_filter (const char * key, int len)
 
 /*
  * Takes a pointer+size to an untrusted memory region containing a
- * NUL-separated list of strings. It builds a argv-style list in trusted memory
+ * NUL-separated list of strings. It builds an argv-style list in trusted memory
  * with those strings.
  *
  * It is responsible for handling the access to untrusted memory safely
@@ -147,44 +131,45 @@ static int loader_filter (const char * key, int len)
  * to free it (For argv and envp we rely on auto free on termination in
  * practice).
  */
-static const char** make_argv_list(void * uptr_src, uint64_t src_size) {
-    const char **argv;
+static const char** make_argv_list(void* uptr_src, size_t src_size) {
+    const char** argv;
 
     if (src_size == 0) {
         argv = malloc(sizeof(char *));
-        argv[0] = NULL;
+        if (argv)
+            argv[0] = NULL;
         return argv;
     }
 
-    char * data = malloc(src_size);
+    char* data = malloc(src_size);
     if (!data) {
         return NULL;
     }
 
     if (!sgx_copy_to_enclave(data, src_size, uptr_src, src_size)) {
-        goto free_and_err;
+        goto fail;
     }
     data[src_size - 1] = '\0';
 
-    uint64_t argc = 0;
-    for (uint64_t i = 0; i < src_size; i++) {
+    size_t argc = 0;
+    for (size_t i = 0; i < src_size; i++) {
         if (data[i] == '\0') {
             argc++;
         }
     }
 
     size_t argv_size;
-    if (__builtin_mul_overflow(argc + 1, sizeof(char *), &argv_size)) {
-        goto free_and_err;
+    if (__builtin_mul_overflow(argc + 1, sizeof(char*), &argv_size)) {
+        goto fail;
     }
     argv = malloc(argv_size);
     if (!argv) {
-        goto free_and_err;
+        goto fail;
     }
     argv[argc] = NULL;
 
-    uint64_t data_i = 0;
-    for (uint64_t arg_i = 0; arg_i < argc; arg_i++) {
+    size_t data_i = 0;
+    for (size_t arg_i = 0; arg_i < argc; arg_i++) {
         argv[arg_i] = &data[data_i];
         while (data[data_i] != '\0') {
             data_i++;
@@ -194,7 +179,7 @@ static const char** make_argv_list(void * uptr_src, uint64_t src_size) {
 
     return argv;
 
-free_and_err:
+fail:
     free(data);
     return NULL;
 }
@@ -263,10 +248,9 @@ void pal_linux_main(char * uptr_args, uint64_t args_size,
     pal_sec.manifest_name[sizeof(pal_sec.manifest_name) - 1] = '\0';
 
     pal_sec.stream_fd = sec_info.stream_fd;
-    pal_sec.cargo_fd  = sec_info.cargo_fd;
 
     COPY_ARRAY(pal_sec.pipe_prefix, sec_info.pipe_prefix);
-    pal_sec.aesm_targetinfo = sec_info.aesm_targetinfo;
+    pal_sec.qe_targetinfo = sec_info.qe_targetinfo;
 #ifdef DEBUG
     pal_sec.in_gdb = sec_info.in_gdb;
 #endif
@@ -306,8 +290,10 @@ void pal_linux_main(char * uptr_args, uint64_t args_size,
     /* set up page allocator and slab manager */
     init_slab_mgr(g_page_size);
     init_untrusted_slab_mgr();
-    init_pages();
+    init_enclave_pages();
     init_enclave_key();
+
+    init_cpuid();
 
     /* now we can add a link map for PAL itself */
     setup_pal_map(&pal_map);
@@ -325,11 +311,11 @@ void pal_linux_main(char * uptr_args, uint64_t args_size,
     if (args_size > MAX_ARGS_SIZE || env_size > MAX_ENV_SIZE) {
         return;
     }
-    const char ** arguments = make_argv_list(uptr_args, args_size);
+    const char** arguments = make_argv_list(uptr_args, args_size);
     if (!arguments) {
         return;
     }
-    const char ** environments = make_argv_list(uptr_env, env_size);
+    const char** environments = make_argv_list(uptr_env, env_size);
     if (!environments) {
         return;
     }
@@ -341,6 +327,13 @@ void pal_linux_main(char * uptr_args, uint64_t args_size,
     linux_state.process_id = (start_time & (~0xffff)) | pal_sec.pid;
 
     SET_ENCLAVE_TLS(ready_for_exceptions, 1UL);
+
+    /* initialize master key (used for pipes' encryption for all enclaves of an application); it
+     * will be overwritten below in init_child_process() with inherited-from-parent master key if
+     * this enclave is child */
+    int ret = _DkRandomBitsRead(&g_master_key, sizeof(g_master_key));
+    if (ret < 0)
+        return;
 
     /* if there is a parent, create parent handle */
     if (pal_sec.ppid) {
@@ -373,8 +366,7 @@ void pal_linux_main(char * uptr_args, uint64_t args_size,
     void* manifest_addr = enclave_top - ALIGN_UP_PTR_POW2(manifest_size, g_page_size);
 
     /* parse manifest data into config storage */
-    struct config_store * root_config =
-            malloc(sizeof(struct config_store));
+    struct config_store* root_config = malloc(sizeof(struct config_store));
     root_config->raw_data = manifest_addr;
     root_config->raw_size = manifest_size;
     root_config->malloc = malloc;
@@ -389,11 +381,6 @@ void pal_linux_main(char * uptr_args, uint64_t args_size,
     pal_state.root_config = root_config;
     __pal_control.manifest_preload.start = (PAL_PTR) manifest_addr;
     __pal_control.manifest_preload.end = (PAL_PTR) manifest_addr + manifest_size;
-
-    if ((rv = init_trusted_platform()) < 0) {
-        SGX_DBG(DBG_E, "Failed to verify the platform using remote attestation: %d\n", rv);
-        ocall_exit(rv, true);
-    }
 
     if ((rv = init_trusted_files()) < 0) {
         SGX_DBG(DBG_E, "Failed to load the checksums of trusted files: %d\n", rv);
@@ -430,130 +417,3 @@ void pal_linux_main(char * uptr_args, uint64_t args_size,
              arguments, environments);
 }
 
-/* the following code is borrowed from CPUID */
-
-static void cpuid (unsigned int leaf, unsigned int subleaf,
-                   unsigned int words[])
-{
-    _DkCpuIdRetrieve(leaf, subleaf, words);
-}
-
-#define FOUR_CHARS_VALUE(s, w)      \
-    (s)[0] = (w) & 0xff;            \
-    (s)[1] = ((w) >>  8) & 0xff;    \
-    (s)[2] = ((w) >> 16) & 0xff;    \
-    (s)[3] = ((w) >> 24) & 0xff;
-
-#define BPI  32
-#define POWER2(power) \
-   (1ULL << (power))
-#define RIGHTMASK(width) \
-   (((unsigned long)(width) >= BPI) ? ~0ULL : POWER2(width) - 1ULL)
-
-#define BIT_EXTRACT_LE(value, start, after) \
-   (((unsigned long)(value) & RIGHTMASK(after)) >> start)
-
-static char * cpu_flags[]
-      = { "fpu",    // "x87 FPU on chip"
-          "vme",    // "virtual-8086 mode enhancement"
-          "de",     // "debugging extensions"
-          "pse",    // "page size extensions"
-          "tsc",    // "time stamp counter"
-          "msr",    // "RDMSR and WRMSR support"
-          "pae",    // "physical address extensions"
-          "mce",    // "machine check exception"
-          "cx8",    // "CMPXCHG8B inst."
-          "apic",   // "APIC on chip"
-          NULL,
-          "sep",    // "SYSENTER and SYSEXIT"
-          "mtrr",   // "memory type range registers"
-          "pge",    // "PTE global bit"
-          "mca",    // "machine check architecture"
-          "cmov",   // "conditional move/compare instruction"
-          "pat",    // "page attribute table"
-          "pse36",  // "page size extension"
-          "pn",     // "processor serial number"
-          "clflush",    // "CLFLUSH instruction"
-          NULL,
-          "dts",    // "debug store"
-          "acpi",   // "Onboard thermal control"
-          "mmx",    // "MMX Technology"
-          "fxsr",   // "FXSAVE/FXRSTOR"
-          "sse",    // "SSE extensions"
-          "sse2",   // "SSE2 extensions"
-          "ss",     // "self snoop"
-          "ht",     // "hyper-threading / multi-core supported"
-          "tm",     // "therm. monitor"
-          "ia64",   // "IA64"
-          "pbe",    // "pending break event"
-        };
-
-
-int _DkGetCPUInfo (PAL_CPU_INFO * ci)
-{
-    unsigned int words[PAL_CPUID_WORD_NUM];
-    int rv = 0;
-
-    const size_t VENDOR_ID_SIZE = 13;
-    char* vendor_id = malloc(VENDOR_ID_SIZE);
-    cpuid(0, 0, words);
-
-    FOUR_CHARS_VALUE(&vendor_id[0], words[PAL_CPUID_WORD_EBX]);
-    FOUR_CHARS_VALUE(&vendor_id[4], words[PAL_CPUID_WORD_EDX]);
-    FOUR_CHARS_VALUE(&vendor_id[8], words[PAL_CPUID_WORD_ECX]);
-    vendor_id[VENDOR_ID_SIZE - 1] = '\0';
-    ci->cpu_vendor = vendor_id;
-    // Must be an Intel CPU
-    if (memcmp(vendor_id, "GenuineIntel", 12)) {
-      free(vendor_id);
-      return -PAL_ERROR_INVAL;
-    }
-
-    const size_t BRAND_SIZE = 49;
-    char* brand = malloc(BRAND_SIZE);
-    cpuid(0x80000002, 0, words);
-    memcpy(&brand[ 0], words, sizeof(unsigned int) * PAL_CPUID_WORD_NUM);
-    cpuid(0x80000003, 0, words);
-    memcpy(&brand[16], words, sizeof(unsigned int) * PAL_CPUID_WORD_NUM);
-    cpuid(0x80000004, 0, words);
-    memcpy(&brand[32], words, sizeof(unsigned int) * PAL_CPUID_WORD_NUM);
-    brand[BRAND_SIZE - 1] = '\0';
-    ci->cpu_brand = brand;
-
-    /* we cannot use CPUID(0xb) because it counts even disabled-by-BIOS cores (e.g. HT cores);
-     * instead, this is passed in via pal_sec at start-up time. */
-    ci->cpu_num = pal_sec.num_cpus;
-
-    cpuid(1, 0, words);
-    ci->cpu_family   = BIT_EXTRACT_LE(words[PAL_CPUID_WORD_EAX],  8, 12) +
-                       BIT_EXTRACT_LE(words[PAL_CPUID_WORD_EAX], 20, 28);
-    ci->cpu_model    = BIT_EXTRACT_LE(words[PAL_CPUID_WORD_EAX],  4,  8) +
-                      (BIT_EXTRACT_LE(words[PAL_CPUID_WORD_EAX], 16, 20) << 4);
-    ci->cpu_stepping = BIT_EXTRACT_LE(words[PAL_CPUID_WORD_EAX],  0,  4);
-
-    int flen = 0, fmax = 80;
-    char * flags = malloc(fmax);
-
-    for (int i = 0 ; i < 32 ; i++) {
-        if (!cpu_flags[i])
-            continue;
-
-        if (BIT_EXTRACT_LE(words[PAL_CPUID_WORD_EDX], i, i + 1)) {
-            int len = strlen(cpu_flags[i]);
-            if (flen + len + 1 > fmax) {
-                char * new_flags = malloc(fmax * 2);
-                memcpy(new_flags, flags, flen);
-                free(flags);
-                fmax *= 2;
-                flags = new_flags;
-            }
-            memcpy(flags + flen, cpu_flags[i], len);
-            flen += len;
-            flags[flen++] = ' ';
-        }
-    }
-
-    flags[flen ? flen - 1 : 0] = 0;
-    ci->cpu_flags = flags;
-    return rv;
-}

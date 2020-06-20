@@ -15,11 +15,6 @@ RUNTIME = $(abspath $(SCRIPTS_DIR)/../Runtime)
 
 include $(SCRIPTS_DIR)/Makefile.rules
 
-CFLAGS += -std=gnu99
-
-# TODO: enable -Wunused-result
-CFLAGS += -Wno-unused-result
-
 CFLAGS-libos = -I$(SHIMDIR)/include -L$(SHIMDIR)/../glibc-build/libos
 
 CFLAGS-libos-debug = -I$(SHIMDIR)/include -I$(PALDIR)/../include/pal -I$(PALDIR)/../include/lib -fno-builtin -nostdlib
@@ -38,19 +33,19 @@ sgx-tokens: $(call expand_target_to_token,$(exec_target))
 
 ifeq ($(ABSPATH_IN_MANIFEST),yes)
 manifest_rules = \
-	-e 's:\$$(PAL):$(abspath $(RUNTIME))/pal_loader:g' \
 	-e 's:\$$(PWD):$(PWD):g' \
 	-e 's:\$$(BIN):$(subst .manifest,,$(notdir $@)):g' \
 	-e 's:\$$(SHIMPATH):$(abspath $(RUNTIME))/libsysdb.so:g' \
 	-e 's:\$$(LIBCDIR):$(abspath $(RUNTIME)):g' \
+	-e 's:\$$(ARCH_LIBDIR):$(ARCH_LIBDIR):g' \
 	$(extra_rules)
 else
 manifest_rules= \
-	-e 's:\$$(PAL):$(abspath $(RUNTIME))/pal_loader:g' \
 	-e 's:\$$(PWD):$(PWD):g' \
 	-e 's:\$$(BIN):$(subst .manifest,,$(notdir $@)):g' \
 	-e 's:\$$(SHIMPATH):$(RUNTIME)/libsysdb.so:g' \
 	-e 's:\$$(LIBCDIR):$(RUNTIME):g' \
+	-e 's:\$$(ARCH_LIBDIR):$(ARCH_LIBDIR):g' \
 	$(extra_rules)
 endif
 

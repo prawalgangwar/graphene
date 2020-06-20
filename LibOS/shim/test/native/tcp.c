@@ -25,7 +25,7 @@ int do_fork                    = 0;
 
 int pipefds[2];
 
-int server(void) {
+static int server(void) {
     int conn, create_socket, new_socket, fd;
     socklen_t addrlen;
     int bufsize  = 1024;
@@ -54,7 +54,10 @@ int server(void) {
     if (mode == PARALLEL) {
         close(pipefds[0]);
         char byte = 0;
-        write(pipefds[1], &byte, 1);
+        if (write(pipefds[1], &byte, 1) != 1) {
+            perror("write error");
+            exit(1);
+        }
     }
 
     addrlen    = sizeof(address);
@@ -101,7 +104,7 @@ int server(void) {
     return 0;
 }
 
-int client(void) {
+static int client(void) {
     int count, create_socket;
     int bufsize  = 1024;
     char* buffer = malloc(bufsize);
@@ -110,7 +113,10 @@ int client(void) {
     if (mode == PARALLEL) {
         close(pipefds[1]);
         char byte = 0;
-        read(pipefds[0], &byte, 1);
+        if (read(pipefds[0], &byte, 1) != 1) {
+            perror("read error");
+            exit(1);
+        }
     }
 
     if ((create_socket = socket(AF_INET, SOCK_STREAM, 0)) >= 0)
@@ -137,7 +143,10 @@ int client(void) {
     printf("Content:\n");
 
     while ((count = recv(create_socket, buffer, bufsize, 0)) > 0) {
-        write(1, buffer, count);
+        if (write(1, buffer, count) != count) {
+            perror("write error");
+            exit(1);
+        }
     }
 
     printf("EOF\n");
@@ -176,7 +185,10 @@ int main(int argc, char** argv) {
         }
     } else {
     old:
-        pipe(pipefds);
+        if (pipe(pipefds) < 0) {
+            perror("pipe error");
+            return 1;
+        }
 
         int pid = fork();
 
@@ -184,7 +196,7 @@ int main(int argc, char** argv) {
             client();
         else {
             server();
-            waitpid(pid, NULL, -1);
+            waitpid(pid, NULL, 0);
         }
     }
 

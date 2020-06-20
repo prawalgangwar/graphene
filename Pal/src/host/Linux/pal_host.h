@@ -1,18 +1,5 @@
-/* Copyright (C) 2014 Stony Brook University
-   This file is part of Graphene Library OS.
-
-   Graphene Library OS is free software: you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public License
-   as published by the Free Software Foundation, either version 3 of the
-   License, or (at your option) any later version.
-
-   Graphene Library OS is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
+/* Copyright (C) 2014 Stony Brook University */
 
 /*
  * pal_host.h
@@ -30,13 +17,13 @@
 #include <atomic.h>
 
 /* Simpler mutex design: a single variable that tracks whether the
- * mutex is locked (just waste a 64 bit word for now).  State is 1 (locked) or
- * 0 (unlocked).
+ * mutex is locked.  State is 1 (locked) or 0 (unlocked).
  * Keep a count of how many threads are waiting on the mutex.
- * If DEBUG_MUTEX is defined,
- * mutex_handle will record the owner of mutex locking. */
+ *
+ * If DEBUG_MUTEX is defined, mutex_handle will record the owner of mutex locking.
+ */
 typedef struct mutex_handle {
-    volatile int64_t locked;
+    uint32_t locked;
     struct atomic_int nwaiters;
 #ifdef DEBUG_MUTEX
     int owner;
@@ -59,6 +46,10 @@ typedef struct {
     PAL_HDR hdr;
 } PAL_RESERVED_HDR;
 
+typedef struct {
+    char str[PIPE_NAME_MAX];
+} PAL_PIPE_NAME;
+
 typedef struct pal_handle
 {
     /* TSAI: Here we define the internal types of PAL_HANDLE
@@ -75,7 +66,6 @@ typedef struct pal_handle
 
         struct {
             PAL_IDX fd;
-            PAL_NUM offset;
             PAL_STR realpath;
             /*
              * map_start is to request this file should be mapped to this
@@ -87,7 +77,7 @@ typedef struct pal_handle
 
         struct {
             PAL_IDX fd;
-            PAL_NUM pipeid;
+            PAL_PIPE_NAME name;
             PAL_BOL nonblocking;
         } pipe;
 
@@ -136,7 +126,6 @@ typedef struct pal_handle
 
         struct {
             PAL_IDX stream;
-            PAL_IDX cargo;
             PAL_IDX pid;
             PAL_BOL nonblocking;
         } process;
@@ -151,7 +140,7 @@ typedef struct pal_handle
         } mutex;
 
         struct {
-            struct atomic_int signaled;
+            uint32_t signaled;
             struct atomic_int nwaiters;
             PAL_BOL isnotification;
         } event;

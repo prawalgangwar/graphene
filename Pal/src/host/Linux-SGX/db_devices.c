@@ -1,18 +1,5 @@
-/* Copyright (C) 2014 Stony Brook University
-   This file is part of Graphene Library OS.
-
-   Graphene Library OS is free software: you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public License
-   as published by the Free Software Foundation, either version 3 of the
-   License, or (at your option) any later version.
-
-   Graphene Library OS is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
+/* Copyright (C) 2014 Stony Brook University */
 
 /*
  * db_device.c
@@ -115,11 +102,16 @@ static int open_standard_term(PAL_HANDLE* handle, const char* param, int access)
 /* 'open' operation for terminal stream */
 static int term_open(PAL_HANDLE* handle, const char* type, const char* uri, int access, int share,
                      int create, int options) {
-    if (strcmp_static(type, "tty"))
-        return -PAL_ERROR_INVAL;
+    __UNUSED(share);
+    __UNUSED(create);
+    __UNUSED(options);
 
-    if (!WITHIN_MASK(share, PAL_SHARE_MASK) || !WITHIN_MASK(create, PAL_CREATE_MASK) ||
-        !WITHIN_MASK(options, PAL_OPTION_MASK))
+    assert(WITHIN_MASK(access,  PAL_ACCESS_MASK));
+    assert(WITHIN_MASK(share,   PAL_SHARE_MASK));
+    assert(WITHIN_MASK(create,  PAL_CREATE_MASK));
+    assert(WITHIN_MASK(options, PAL_OPTION_MASK));
+
+    if (strcmp_static(type, "tty"))
         return -PAL_ERROR_INVAL;
 
     const char* term  = NULL;
@@ -194,7 +186,7 @@ static int64_t char_read(PAL_HANDLE handle, uint64_t offset, uint64_t size, void
     if (size != (uint32_t)size)
         return -PAL_ERROR_INVAL;
 
-    int bytes = ocall_read(fd, buffer, size);
+    ssize_t bytes = ocall_read(fd, buffer, size);
     return IS_ERR(bytes) ? unix_to_pal_error(ERRNO(bytes)) : bytes;
 }
 
@@ -211,7 +203,7 @@ static int64_t char_write(PAL_HANDLE handle, uint64_t offset, uint64_t size, con
     if (size != (uint32_t)size)
         return -PAL_ERROR_INVAL;
 
-    int bytes = ocall_write(fd, buffer, size);
+    ssize_t bytes = ocall_write(fd, buffer, size);
     return IS_ERR(bytes) ? unix_to_pal_error(ERRNO(bytes)) : bytes;
 }
 

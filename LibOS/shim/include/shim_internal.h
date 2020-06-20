@@ -1,18 +1,5 @@
-/* Copyright (C) 2014 Stony Brook University
-   This file is part of Graphene Library OS.
-
-   Graphene Library OS is free software: you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public License
-   as published by the Free Software Foundation, either version 3 of the
-   License, or (at your option) any later version.
-
-   Graphene Library OS is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
+/* Copyright (C) 2014 Stony Brook University */
 
 /*
  * shim_internal.h
@@ -36,10 +23,13 @@
 
 #include <api.h>
 #include <assert.h>
-#include <shim_types.h>
-#include <shim_defs.h>
 #include <atomic.h>
+#include <shim_defs.h>
+#include <shim_internal-arch.h>
 #include <shim_tcb.h>
+#include <shim_types.h>
+
+void* shim_init(int argc, void* args);
 
 noreturn void shim_clean_and_exit(int exit_code);
 
@@ -48,7 +38,7 @@ static inline unsigned int get_cur_tid(void) {
     return SHIM_TCB_GET(tid);
 }
 
-#define PAL_NATIVE_ERRNO        (SHIM_TCB_GET(pal_errno))
+#define PAL_NATIVE_ERRNO()      SHIM_TCB_GET(pal_errno)
 
 #define INTERNAL_TID_BASE       ((IDTYPE) 1 << (sizeof(IDTYPE) * 8 - 1))
 
@@ -145,20 +135,16 @@ static inline PAL_HANDLE __open_shim_stdio (void)
     return shim_stdio;
 }
 
-#define USE_PAUSE       0
-
-static inline void do_pause (void);
-
-#if USE_PAUSE == 1
-# define PAUSE() do { do_pause(); } while (0)
+#if 0
+# define DEBUG_BREAK_ON_FAILURE() DEBUG_BREAK()
 #else
-# define PAUSE() do { __asm__ volatile ("int $3"); } while (0)
+# define DEBUG_BREAK_ON_FAILURE() do {} while (0)
 #endif
 
 #define BUG()                                                               \
     do {                                                                    \
         __SYS_PRINTF("BUG() " __FILE__ ":%d\n", __LINE__);                  \
-        PAUSE();                                                            \
+        DEBUG_BREAK_ON_FAILURE();                                           \
         shim_clean_and_exit(-ENOTRECOVERABLE);                              \
     } while (0)
 
@@ -166,32 +152,14 @@ static inline void do_pause (void);
     do { debug("%s (" __FILE__ ":%d)\n", __func__, __LINE__); } while (0)
 
 /* definition for syscall table */
-void handle_signal (void);
-long convert_pal_errno (long err);
+void handle_signals(void);
+long convert_pal_errno(long err);
 void syscall_wrapper(void);
 void syscall_wrapper_after_syscalldb(void);
 
-#define PAL_ERRNO  convert_pal_errno(PAL_NATIVE_ERRNO)
+#define PAL_ERRNO() convert_pal_errno(PAL_NATIVE_ERRNO())
 
 #define SHIM_ARG_TYPE long
-
-#ifdef PROFILE
-# define ENTER_TIME     shim_get_tcb()->context.enter_time
-# define BEGIN_SYSCALL_PROFILE()        \
-    do { ENTER_TIME = GET_PROFILE_INTERVAL(); } while (0)
-# define END_SYSCALL_PROFILE(name)      \
-    do { unsigned long _interval = GET_PROFILE_INTERVAL();          \
-         if (_interval - ENTER_TIME > 1000)                         \
-             SAVE_PROFILE_INTERVAL_SET(syscall_##name##_slow, ENTER_TIME, _interval); \
-         else                                                       \
-             SAVE_PROFILE_INTERVAL_SET(syscall_##name, ENTER_TIME, _interval); \
-         ENTER_TIME = 0; } while (0)
-#else
-# define BEGIN_SYSCALL_PROFILE()        do {} while (0)
-# define END_SYSCALL_PROFILE(name)      do {} while (0)
-#endif
-
-void check_stack_hook (void);
 
 static inline int64_t get_cur_preempt (void) {
     shim_tcb_t* tcb = shim_get_tcb();
@@ -203,21 +171,15 @@ static inline int64_t get_cur_preempt (void) {
     SHIM_ARG_TYPE __shim_##name(args) {                     \
         SHIM_ARG_TYPE ret = 0;                              \
         int64_t preempt = get_cur_preempt();                \
-        __UNUSED(preempt);                                  \
-        /* handle_signal(); */                              \
-        /* check_stack_hook(); */                           \
-        BEGIN_SYSCALL_PROFILE();
+        __UNUSED(preempt);
 
 #define END_SHIM(name)                                      \
-        END_SYSCALL_PROFILE(name);                          \
-        handle_signal();                                    \
+        handle_signals();                                   \
         assert(preempt == get_cur_preempt());               \
         return ret;                                         \
     }
 
 #define DEFINE_SHIM_SYSCALL(name, n, func, ...)             \
-    DEFINE_PROFILE_INTERVAL(syscall_##name##_slow, syscall); \
-    DEFINE_PROFILE_INTERVAL(syscall_##name, syscall);       \
     SHIM_SYSCALL_##n (name, func, __VA_ARGS__)              \
     EXPORT_SHIM_SYSCALL (name, n, __VA_ARGS__)
 
@@ -378,57 +340,56 @@ void parse_syscall_after (int sysno, const char * name, int nr, ...);
         __UNUSED(__arg1);                       \
     } while (0)
 #define SHIM_UNUSED_ARGS_2() do {               \
-        __UNUSED(__arg1);                       \
+        SHIM_UNUSED_ARGS_1();                   \
         __UNUSED(__arg2);                       \
     } while (0)
 #define SHIM_UNUSED_ARGS_3() do {               \
-        __UNUSED(__arg1);                       \
-        __UNUSED(__arg2);                       \
+        SHIM_UNUSED_ARGS_2();                   \
         __UNUSED(__arg3);                       \
     } while (0)
 #define SHIM_UNUSED_ARGS_4() do {               \
-        __UNUSED(__arg1);                       \
-        __UNUSED(__arg2);                       \
-        __UNUSED(__arg3);                       \
+        SHIM_UNUSED_ARGS_3();                   \
         __UNUSED(__arg4);                       \
     } while (0)
 
 #define SHIM_UNUSED_ARGS_5() do {               \
-        __UNUSED(__arg1);                       \
-        __UNUSED(__arg2);                       \
-        __UNUSED(__arg3);                       \
-        __UNUSED(__arg4);                       \
+        SHIM_UNUSED_ARGS_4();                   \
         __UNUSED(__arg5);                       \
     } while (0)
 
 #define SHIM_UNUSED_ARGS_6() do {               \
-        __UNUSED(__arg1);                       \
-        __UNUSED(__arg2);                       \
-        __UNUSED(__arg3);                       \
-        __UNUSED(__arg4);                       \
-        __UNUSED(__arg5);                       \
+        SHIM_UNUSED_ARGS_5();                   \
         __UNUSED(__arg6);                       \
     } while (0)
 
-#define DO_SYSCALL(...) DO_SYSCALL2(__VA_ARGS__)
-#define DO_SYSCALL2(n, ...) -ENOSYS
+#define SHIM_SYSCALL_PROTO_0(NAME, RTYPE) \
+    RTYPE shim_##NAME(void)
 
-#define DO_SYSCALL_0(sysno) -ENOSYS
-#define DO_SYSCALL_1(sysno, ...) DO_SYSCALL(1, sysno, SHIM_PASS_ARGS_1)
-#define DO_SYSCALL_2(sysno, ...) DO_SYSCALL(2, sysno, SHIM_PASS_ARGS_2)
-#define DO_SYSCALL_3(sysno, ...) DO_SYSCALL(3, sysno, SHIM_PASS_ARGS_3)
-#define DO_SYSCALL_4(sysno, ...) DO_SYSCALL(4, sysno, SHIM_PASS_ARGS_4)
-#define DO_SYSCALL_5(sysno, ...) DO_SYSCALL(5, sysno, SHIM_PASS_ARGS_5)
-#define DO_SYSCALL_6(sysno, ...) DO_SYSCALL(6, sysno, SHIM_PASS_ARGS_6)
+#define SHIM_SYSCALL_PROTO_1(NAME, RTYPE, T1, P1) \
+    RTYPE shim_##NAME(T1 P1)
 
-#define SHIM_SYSCALL_PASSTHROUGH(name, n, ...)                      \
-    DEFINE_PROFILE_INTERVAL(syscall_##name##_slow, syscall);        \
-    DEFINE_PROFILE_INTERVAL(syscall_##name, syscall);               \
-    BEGIN_SHIM(name, SHIM_PROTO_ARGS_##n)                           \
-        debug("WARNING: shim_" #name " not implemented\n");         \
-        SHIM_UNUSED_ARGS_##n();                                     \
-        ret = DO_SYSCALL_##n(__NR_##name);                          \
-    END_SHIM(name)                                                  \
+#define SHIM_SYSCALL_PROTO_2(NAME, RTYPE, T1, P1, T2, P2) \
+    RTYPE shim_##NAME(T1 P1, T2 P2)
+
+#define SHIM_SYSCALL_PROTO_3(NAME, RTYPE, T1, P1, T2, P2, T3, P3) \
+    RTYPE shim_##NAME(T1 P1, T2 P2, T3 P3)
+
+#define SHIM_SYSCALL_PROTO_4(NAME, RTYPE, T1, P1, T2, P2, T3, P3, T4, P4) \
+    RTYPE shim_##NAME(T1 P1, T2 P2, T3 P3, T4 P4)
+
+#define SHIM_SYSCALL_PROTO_5(NAME, RTYPE, T1, P1, T2, P2, T3, P3, T4, P4, T5, P5) \
+    RTYPE shim_##NAME(T1 P1, T2 P2, T3 P3, T4 P4, T5 P5)
+
+#define SHIM_SYSCALL_PROTO_6(NAME, RTYPE, T1, P1, T2, P2, T3, P3, T4, P4, T5, P5, T6, P6) \
+    RTYPE shim_##NAME(T1 P1, T2 P2, T3 P3, T4 P4, T5 P5, T6 P6)
+
+#define SHIM_SYSCALL_RETURN_ENOSYS(name, n, ...)                                   \
+    SHIM_SYSCALL_PROTO_##n(name, __VA_ARGS__);                                     \
+    BEGIN_SHIM(name, SHIM_PROTO_ARGS_##n)                                          \
+        debug("WARNING: syscall " #name " not implemented. Returning -ENOSYS.\n"); \
+        SHIM_UNUSED_ARGS_##n();                                                    \
+        ret = -ENOSYS;                                                             \
+    END_SHIM(name)                                                                 \
     EXPORT_SHIM_SYSCALL(name, n, __VA_ARGS__)
 
 #define CONCAT2(t1, t2) __CONCAT2(t1, t2)
@@ -488,7 +449,7 @@ static inline void __enable_preempt (shim_tcb_t * tcb)
     //debug("enable preempt: %d\n", preempt);
 }
 
-void __handle_signal (shim_tcb_t * tcb, int sig);
+void __handle_signals(shim_tcb_t* tcb);
 
 static inline void enable_preempt (shim_tcb_t * tcb)
 {
@@ -500,7 +461,7 @@ static inline void enable_preempt (shim_tcb_t * tcb)
         return;
 
     if (preempt == 1)
-        __handle_signal(tcb, 0);
+        __handle_signals(tcb);
 
     __enable_preempt(tcb);
 }
@@ -660,9 +621,6 @@ static inline void wait_event (AEVENTTYPE * e)
         char byte;
         int n = 0;
         do {
-            if (!DkSynchronizationObjectWait(e->event, NO_TIMEOUT))
-                continue;
-
             n = DkStreamRead(e->event, 0, 1, &byte, NULL, 0);
         } while (!n);
     }
@@ -679,13 +637,6 @@ static inline void clear_event (AEVENTTYPE * e)
     }
 }
 
-static inline void do_pause (void)
-{
-    bool go = false;
-    while (!go)
-        DkThreadDelayExecution(60 * 60 * 1000000ULL);
-}
-
 /* reference counter APIs */
 #define REF_GET(ref)            atomic_read(&(ref))
 #define REF_SET(ref, count)     atomic_set(&(ref), count)
@@ -696,7 +647,7 @@ static inline int __ref_inc (REFTYPE * ref)
     do {
         _c = atomic_read(ref);
         assert(_c >= 0);
-    } while (atomic_cmpxchg(ref, _c, _c + 1) != _c);
+    } while (!atomic_cmpxchg(ref, _c, _c + 1));
     return _c + 1;
 }
 
@@ -712,35 +663,11 @@ static inline int __ref_dec (REFTYPE * ref)
             BUG();
             return 0;
         }
-    } while (atomic_cmpxchg(ref, _c, _c - 1) != _c);
+    } while (!atomic_cmpxchg(ref, _c, _c - 1));
     return _c - 1;
 }
 
 #define REF_DEC(ref) __ref_dec(&(ref))
-
-/* integer hash functions */
-static inline uint32_t hash32 (uint32_t key)
-{
-    key = ~key + (key << 15);
-    key = key ^ (key >> 12);
-    key = key + (key << 2);
-    key = key ^ (key >> 4);
-    key = (key + (key << 3)) + (key << 11);
-    key = key ^ (key >> 16);
-    return key;
-}
-
-static inline uint64_t hash64 (uint64_t key)
-{
-    key = (~key) + (key << 21);
-    key = key ^ (key >> 24);
-    key = (key + (key << 3)) + (key << 8);
-    key = key ^ (key >> 14);
-    key = (key + (key << 2)) + (key << 4);
-    key = key ^ (key >> 28);
-    key = key + (key << 31);
-    return key;
-}
 
 #ifndef __alloca
 # define __alloca __builtin_alloca
@@ -778,13 +705,10 @@ unsigned long parse_int (const char * str);
 extern void * initial_stack;
 extern const char ** initial_envp;
 
-void get_brk_region (void ** start, void ** end, void ** current);
-
-int reset_brk (void);
 struct shim_handle;
 int init_brk_from_executable (struct shim_handle * exec);
 int init_brk_region(void* brk_region, size_t data_segment_size);
-int init_heap (void);
+void reset_brk(void);
 int init_internal_map (void);
 int init_loader (void);
 int init_manifest (PAL_HANDLE manifest_handle);
@@ -801,51 +725,5 @@ int object_wait_with_retry(PAL_HANDLE handle);
 void release_clear_child_tid(int* clear_child_tid);
 
 void delete_from_epoll_handles(struct shim_handle* handle);
-
-#ifdef __x86_64__
-#define __SWITCH_STACK(stack_top, func, arg)                    \
-    do {                                                        \
-        /* 16 Bytes align of stack */                           \
-        uintptr_t __stack_top = (uintptr_t)(stack_top);         \
-        __stack_top &= ~0xf;                                    \
-        __stack_top -= 8;                                       \
-        __asm__ volatile (                                      \
-            "movq %0, %%rbp\n"                                  \
-            "movq %0, %%rsp\n"                                  \
-            "jmpq *%1\n"                                        \
-            ::"r"(__stack_top), "r"(func), "D"(arg): "memory"); \
-    } while (0)
-
-static_always_inline void * current_stack(void)
-{
-    void * _rsp;
-    __asm__ volatile ("movq %%rsp, %0" : "=r"(_rsp) :: "memory");
-    return _rsp;
-}
-
-static_always_inline bool __range_not_ok(unsigned long addr, unsigned long size) {
-    addr += size;
-    if (addr < size) {
-        /* pointer arithmetic overflow, this check is x86-64 specific */
-        return true;
-    }
-    return false;
-}
-
-/* Check if pointer to memory region is valid. Return true if the memory
- * region may be valid, false if it is definitely invalid. */
-static inline bool access_ok(const volatile void* addr, size_t size) {
-    return !__range_not_ok((unsigned long)addr, (unsigned long)size);
-}
-
-#else
-# error "Unsupported architecture"
-#endif /* __x86_64__ */
-
-static inline IDTYPE hashtype_to_idtype(HASHTYPE hash) {
-    static_assert(sizeof(HASHTYPE) == 8, "Unsupported HASHTYPE size");
-    static_assert(sizeof(IDTYPE) == 4, "Unsupported IDTYPE size");
-    return ((IDTYPE)hash) ^ ((IDTYPE)(hash >> 32));
-}
 
 #endif /* _PAL_INTERNAL_H_ */

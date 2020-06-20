@@ -1,27 +1,13 @@
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
 /* Copyright (C) 2017 Fortanix, Inc.
-   Copyright (C) 2019 Intel Corp.
-
-   This file is part of Graphene Library OS.
-
-   Graphene Library OS is free software: you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public License
-   as published by the Free Software Foundation, either version 3 of the
-   License, or (at your option) any later version.
-
-   Graphene Library OS is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+ * Copyright (C) 2019 Intel Corp.
+ */
 
 #ifndef MBEDTLS_CONFIG_H
 #define MBEDTLS_CONFIG_H
 
 #define MBEDTLS_AESNI_C
 #define MBEDTLS_AES_C
-#define MBEDTLS_ASN1_PARSE_C
 #define MBEDTLS_BASE64_C
 #define MBEDTLS_BIGNUM_C
 #define MBEDTLS_CIPHER_C
@@ -47,6 +33,7 @@
 #define MBEDTLS_SHA256_C
 #define MBEDTLS_SSL_CIPHERSUITES MBEDTLS_TLS_PSK_WITH_AES_128_GCM_SHA256
 #define MBEDTLS_SSL_CLI_C
+#define MBEDTLS_SSL_CONTEXT_SERIALIZATION
 #define MBEDTLS_SSL_PROTO_TLS1_2
 #define MBEDTLS_SSL_SRV_C
 #define MBEDTLS_SSL_TLS_C

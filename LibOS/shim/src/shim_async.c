@@ -1,18 +1,5 @@
-/* Copyright (C) 2014 Stony Brook University
-   This file is part of Graphene Library OS.
-
-   Graphene Library OS is free software: you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public License
-   as published by the Free Software Foundation, either version 3 of the
-   License, or (at your option) any later version.
-
-   Graphene Library OS is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
+/* Copyright (C) 2014 Stony Brook University */
 
 /*
  * shim_async.c
@@ -56,7 +43,7 @@ static int create_async_helper(void);
  * to Async Helper thread by triggering install_new_event. When event is
  * triggered in Async Helper thread, the corresponding event's callback with
  * arguments `arg` is called. This callback typically sends a signal to the
- * thread who registered the event (saved in `event->caller`).
+ * thread which registered the event (saved in `event->caller`).
  *
  * We distinguish between alarm/timer events and async IO events:
  *   - alarm/timer events set object = NULL and time = seconds
@@ -165,7 +152,7 @@ static void shim_async_helper(void* arg) {
     if (notme) {
         put_thread(self);
         DkThreadExit(/*clear_child_tid=*/NULL);
-        return;
+        /* UNREACHABLE */
     }
 
     /* Assume async helper thread will not drain the stack that PAL provides,
@@ -218,6 +205,7 @@ static void shim_async_helper(void* arg) {
 
         struct async_event* tmp;
         struct async_event* n;
+        bool other_event = false;
         LISTP_FOR_EACH_ENTRY_SAFE(tmp, n, &async_list, list) {
             /* repopulate `pals` with IO events and find the next expiring alarm/timer */
             if (tmp->object) {
@@ -258,6 +246,9 @@ static void shim_async_helper(void* arg) {
                     /* use time of the next expiring alarm/timer */
                     next_expire_time = tmp->expire_time;
                 }
+            } else {
+                /* cleanup events do not have an object nor a timeout */
+                other_event = true;
             }
         }
 
@@ -265,7 +256,7 @@ static void shim_async_helper(void* arg) {
         if (next_expire_time) {
             sleep_time  = next_expire_time - now;
             idle_cycles = 0;
-        } else if (pals_cnt) {
+        } else if (pals_cnt || other_event) {
             sleep_time = NO_TIMEOUT;
             idle_cycles = 0;
         } else {
@@ -354,7 +345,7 @@ static void shim_async_helper(void* arg) {
     free(pal_events);
 
     DkThreadExit(/*clear_child_tid=*/NULL);
-    return;
+    /* UNREACHABLE */
 
 out_err_unlock:
     unlock(&async_helper_lock);
@@ -384,7 +375,7 @@ static int create_async_helper(void) {
         async_helper_thread = NULL;
         async_helper_state  = HELPER_NOTALIVE;
         put_thread(new);
-        return -PAL_ERRNO;
+        return -PAL_ERRNO();
     }
 
     new->pal_handle = handle;

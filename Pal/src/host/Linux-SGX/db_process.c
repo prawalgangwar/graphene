@@ -1,18 +1,5 @@
-/* Copyright (C) 2014 Stony Brook University
-   This file is part of Graphene Library OS.
-
-   Graphene Library OS is free software: you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public License
-   as published by the Free Software Foundation, either version 3 of the
-   License, or (at your option) any later version.
-
-   Graphene Library OS is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
+/* Copyright (C) 2014 Stony Brook University */
 
 /*
  * db_process.c
@@ -254,22 +241,20 @@ int _DkProcessCreate (PAL_HANDLE * handle, const char * uri, const char ** args)
 
     unsigned int child_pid;
     int stream_fd;
-    int cargo_fd;
     int nargs = 0, ret;
 
     if (args)
         for (const char ** a = args ; *a ; a++)
             nargs++;
 
-    ret = ocall_create_process(uri, nargs, args, &stream_fd, &cargo_fd, &child_pid);
+    ret = ocall_create_process(uri, nargs, args, &stream_fd, &child_pid);
     if (ret < 0)
         return ret;
 
     PAL_HANDLE child = malloc(HANDLE_SIZE(process));
     SET_HANDLE_TYPE(child, process);
-    HANDLE_HDR(child)->flags |= RFD(0)|WFD(0)|RFD(1)|WFD(1);
+    HANDLE_HDR(child)->flags |= RFD(0)|WFD(0);
     child->process.stream      = stream_fd;
-    child->process.cargo       = cargo_fd;
     child->process.pid         = child_pid;
     child->process.nonblocking = PAL_FALSE;
     child->process.ssl_ctx     = NULL;
@@ -289,8 +274,14 @@ int _DkProcessCreate (PAL_HANDLE * handle, const char * uri, const char ** args)
         goto failed;
 
     ret = _DkStreamSecureInit(child, /*is_server=*/true, &child->process.session_key,
-                              (LIB_SSL_CONTEXT**)&child->process.ssl_ctx);
+                              (LIB_SSL_CONTEXT**)&child->process.ssl_ctx, NULL, 0);
     if (ret < 0)
+        goto failed;
+
+    /* securely send the master key to child in the newly established SSL session */
+    ret = _DkStreamSecureWrite(child->process.ssl_ctx, (uint8_t*)&g_master_key,
+                               sizeof(g_master_key));
+    if (ret != sizeof(g_master_key))
         goto failed;
 
     *handle = child;
@@ -321,10 +312,9 @@ int init_child_process (PAL_HANDLE * parent_handle)
 {
     PAL_HANDLE parent = malloc(HANDLE_SIZE(process));
     SET_HANDLE_TYPE(parent, process);
-    HANDLE_HDR(parent)->flags |= RFD(0)|WFD(0)|RFD(1)|WFD(1);
+    HANDLE_HDR(parent)->flags |= RFD(0)|WFD(0);
 
     parent->process.stream      = pal_sec.stream_fd;
-    parent->process.cargo       = pal_sec.cargo_fd;
     parent->process.pid         = pal_sec.ppid;
     parent->process.nonblocking = PAL_FALSE;
     parent->process.ssl_ctx     = NULL;
@@ -344,8 +334,14 @@ int init_child_process (PAL_HANDLE * parent_handle)
         return ret;
 
     ret = _DkStreamSecureInit(parent, /*is_server=*/false, &parent->process.session_key,
-                              (LIB_SSL_CONTEXT**)&parent->process.ssl_ctx);
+                              (LIB_SSL_CONTEXT**)&parent->process.ssl_ctx, NULL, 0);
     if (ret < 0)
+        return ret;
+
+    /* securely receive the master key from parent in the newly established SSL session */
+    ret = _DkStreamSecureRead(parent->process.ssl_ctx, (uint8_t*)&g_master_key,
+                              sizeof(g_master_key));
+    if (ret != sizeof(g_master_key))
         return ret;
 
     *parent_handle = parent;
@@ -376,7 +372,7 @@ static int64_t proc_read (PAL_HANDLE handle, uint64_t offset, uint64_t count,
     if (count != (uint32_t)count)
         return -PAL_ERROR_INVAL;
 
-    int bytes;
+    ssize_t bytes;
     if (handle->process.ssl_ctx) {
         bytes = _DkStreamSecureRead(handle->process.ssl_ctx, buffer, count);
     } else {
@@ -396,7 +392,7 @@ static int64_t proc_write (PAL_HANDLE handle, uint64_t offset, uint64_t count,
     if (count != (uint32_t)count)
         return -PAL_ERROR_INVAL;
 
-    int bytes;
+    ssize_t bytes;
     if (handle->process.ssl_ctx) {
         bytes = _DkStreamSecureWrite(handle->process.ssl_ctx, buffer, count);
     } else {
@@ -412,11 +408,6 @@ static int proc_close (PAL_HANDLE handle)
     if (handle->process.stream != PAL_IDX_POISON) {
         ocall_close(handle->process.stream);
         handle->process.stream = PAL_IDX_POISON;
-    }
-
-    if (handle->process.cargo != PAL_IDX_POISON) {
-        ocall_close(handle->process.cargo);
-        handle->process.cargo = PAL_IDX_POISON;
     }
 
     if (handle->process.ssl_ctx) {
@@ -446,9 +437,6 @@ static int proc_delete (PAL_HANDLE handle, int access)
 
     if (handle->process.stream != PAL_IDX_POISON)
         ocall_shutdown(handle->process.stream, shutdown);
-
-    if (handle->process.cargo != PAL_IDX_POISON)
-        ocall_shutdown(handle->process.cargo, shutdown);
 
     return 0;
 }

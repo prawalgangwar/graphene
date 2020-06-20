@@ -24,17 +24,17 @@
 #include <asm/posix_types.h>
 #include <asm/statfs.h>
 #include <asm/stat.h>
-#include <asm/ldt.h>
 #include <asm/signal.h>
 #include <asm/siginfo.h>
 #include <asm/poll.h>
+
+#include "shim_types-arch.h"
 
 typedef unsigned int        __u32;
 
 typedef unsigned long int   nfds_t;
 typedef unsigned long int   nlink_t;
 
-typedef uint32_t            socklen_t;
 typedef __kernel_uid_t      uid_t;
 typedef __kernel_gid_t      gid_t;
 typedef __kernel_pid_t      pid_t;
@@ -155,19 +155,11 @@ struct __kernel_sigaction {
     __sighandler_t k_sa_handler;
     unsigned long sa_flags;
     void (*sa_restorer) (void);
-    sigset_t sa_mask;
+    __sigset_t sa_mask;
 };
 
 /* linux/aio_abi.h (for io_setup which has no glibc wrapper) */
 typedef unsigned long aio_context_t;
-
-/* asm/signal.h */
-#define NUM_SIGS            64
-#define NUM_KNOWN_SIGS      32
-
-typedef struct {
-    unsigned long __val[NUM_SIGS / (8 * sizeof(unsigned long))];
-} __sigset_t;
 
 /* linux/rlimit.h */
 struct __kernel_rusage {
@@ -213,115 +205,6 @@ __attribute__((packed));
 ;
 #endif
 
-/* sys/ucontext.h */
-/* Type for general register.  */
-typedef long int greg_t;
-
-/* Number of general registers.  */
-#define NGREG    23
-
-/* Container for all general registers.  */
-typedef greg_t gregset_t[NGREG];
-
-/* Number of each register in the `gregset_t' array.  */
-enum
-{
-    REG_R8 = 0,
-# define REG_R8     REG_R8
-    REG_R9,
-# define REG_R9     REG_R9
-    REG_R10,
-# define REG_R10    REG_R10
-    REG_R11,
-# define REG_R11    REG_R11
-    REG_R12,
-# define REG_R12    REG_R12
-    REG_R13,
-# define REG_R13    REG_R13
-    REG_R14,
-# define REG_R14    REG_R14
-    REG_R15,
-# define REG_R15    REG_R15
-    REG_RDI,
-# define REG_RDI    REG_RDI
-    REG_RSI,
-# define REG_RSI    REG_RSI
-    REG_RBP,
-# define REG_RBP    REG_RBP
-    REG_RBX,
-# define REG_RBX    REG_RBX
-    REG_RDX,
-# define REG_RDX    REG_RDX
-    REG_RAX,
-# define REG_RAX    REG_RAX
-    REG_RCX,
-# define REG_RCX    REG_RCX
-    REG_RSP,
-# define REG_RSP    REG_RSP
-    REG_RIP,
-# define REG_RIP    REG_RIP
-    REG_EFL,
-# define REG_EFL    REG_EFL
-    REG_CSGSFS,        /* Actually short cs, gs, fs, __pad0.  */
-# define REG_CSGSFS REG_CSGSFS
-    REG_ERR,
-# define REG_ERR    REG_ERR
-    REG_TRAPNO,
-# define REG_TRAPNO REG_TRAPNO
-    REG_OLDMASK,
-# define REG_OLDMASK REG_OLDMASK
-    REG_CR2
-# define REG_CR2    REG_CR2
-};
-
-struct _libc_fpxreg {
-    unsigned short int significand[4];
-    unsigned short int exponent;
-    unsigned short int padding[3];
-};
-
-struct _libc_xmmreg {
-    __uint32_t    element[4];
-};
-
-struct _libc_fpstate {
-    /* 64-bit FXSAVE format.  */
-    __uint16_t          cwd;
-    __uint16_t          swd;
-    __uint16_t          ftw;
-    __uint16_t          fop;
-    __uint64_t          rip;
-    __uint64_t          rdp;
-    __uint32_t          mxcsr;
-    __uint32_t          mxcr_mask;
-    struct _libc_fpxreg st[8];
-    struct _libc_xmmreg _xmm[16];
-    __uint32_t          padding[24];
-};
-
-/* Structure to describe FPU registers.  */
-typedef struct _libc_fpstate *fpregset_t;
-
-/* Context to describe whole processor state.  */
-typedef struct {
-    gregset_t gregs;
-    /* Note that fpregs is a pointer.  */
-    fpregset_t fpregs;
-    unsigned long __reserved1 [8];
-} mcontext_t;
-
-/* Userlevel context.  */
-typedef struct ucontext {
-    unsigned long int uc_flags;
-    struct ucontext *uc_link;
-    stack_t uc_stack;
-    mcontext_t uc_mcontext;
-    __sigset_t uc_sigmask;
-    struct _libc_fpstate __fpregs_mem;
-} ucontext_t;
-
-#define RED_ZONE_SIZE   128
-
 /* bits/ustat.h */
 struct __kernel_ustat
   {
@@ -342,18 +225,15 @@ enum
 
 struct msghdr {
     void *msg_name;         /* Address to send to/receive from.  */
-    socklen_t msg_namelen;  /* Length of address data.  */
+    int msg_namelen;        /* Length of address data.  */
 
     struct iovec *msg_iov;  /* Vector of data to send/receive into.  */
     size_t msg_iovlen;      /* Number of elements in the vector.  */
 
     void *msg_control;      /* Ancillary data (eg BSD filedesc passing). */
-    size_t msg_controllen;  /* Ancillary data buffer length.
-                               !! The type should be socklen_t but the
-                               definition of the kernel is incompatible
-                               with this.  */
+    size_t msg_controllen;  /* Ancillary data buffer length. */
 
-    int msg_flags;          /* Flags on received message.  */
+    unsigned int msg_flags; /* Flags on received message.  */
 };
 
 /* For `recvmmsg'.  */
@@ -377,6 +257,14 @@ typedef unsigned short int sa_family_t;
 struct sockaddr {
     __SOCKADDR_COMMON (sa_);    /* Common data: address family and length.  */
     char sa_data[14];           /* Address data.  */
+};
+
+/* From bits/socket.h */
+/* Structure large enough to hold any socket address (with the historical
+   exception of AF_UNIX).  */
+struct sockaddr_storage {
+    __SOCKADDR_COMMON(ss_);    /* Address family, etc.  */
+    char __ss_padding[128 - sizeof(sa_family_t)];
 };
 
 /* linux/mqueue.h */
@@ -451,18 +339,6 @@ struct linux_file_handle {
     unsigned char f_handle[0];
 };
 
-struct __kernel_addrinfo
-{
-  int ai_flags;                 /* Input flags.  */
-  int ai_family;                /* Protocol family for socket.  */
-  int ai_socktype;              /* Socket type.  */
-  int ai_protocol;              /* Protocol for socket.  */
-  socklen_t ai_addrlen;         /* Length of socket address.  */
-  struct sockaddr *ai_addr;     /* Socket address for socket.  */
-  char *ai_canonname;           /* Canonical name for service location.  */
-  struct addrinfo *ai_next;     /* Pointer to next in list.  */
-};
-
 #include "elf.h"
 
 #ifdef __x86_64__
@@ -506,5 +382,8 @@ struct shim_qstr {
     char        name[QSTR_SIZE];
     struct shim_str * oflow;
 };
+
+/* maximum length of pipe/FIFO name (should be less than Linux sockaddr_un.sun_path = 108) */
+#define PIPE_URI_SIZE 96
 
 #endif /* _SHIM_TYPES_H_ */

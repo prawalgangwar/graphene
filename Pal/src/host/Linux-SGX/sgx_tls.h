@@ -1,7 +1,16 @@
 #ifndef __SGX_TLS_H__
 #define __SGX_TLS_H__
 
-#include <pal.h>
+#include <stdatomic.h>
+
+#include "pal.h"
+
+struct untrusted_area {
+    void* mem;
+    uint64_t size;
+    uint64_t in_use;
+    bool valid;
+};
 
 /*
  * Beside the classic thread local storage (like ustack, thread, etc.) the TLS
@@ -11,33 +20,33 @@
  */
 struct enclave_tls {
     PAL_TCB common;
-    struct {
-        /* private to Linux-SGX PAL */
-        uint64_t enclave_size;
-        uint64_t tcs_offset;
-        uint64_t initial_stack_offset;
-        uint64_t tmp_rip;
-        uint64_t sig_stack_low;
-        uint64_t sig_stack_high;
-        void*    ecall_return_addr;
-        void*    ssa;
-        sgx_pal_gpr_t* gpr;
-        void*    exit_target;
-        void*    fsbase;
-        void*    pre_ocall_stack;
-        void*    ustack_top;
-        void*    ustack;
-        struct pal_handle_thread* thread;
-        uint64_t ocall_exit_called;
-        uint64_t thread_started;
-        uint64_t ready_for_exceptions;
-        uint64_t manifest_size;
-        void*    heap_min;
-        void*    heap_max;
-        void*    exec_addr;
-        uint64_t exec_size;
-        int*     clear_child_tid;
-    };
+
+    /* private to Linux-SGX PAL */
+    uint64_t enclave_size;
+    uint64_t tcs_offset;
+    uint64_t initial_stack_offset;
+    uint64_t tmp_rip;
+    uint64_t sig_stack_low;
+    uint64_t sig_stack_high;
+    void*    ecall_return_addr;
+    void*    ssa;
+    sgx_pal_gpr_t* gpr;
+    void*    exit_target;
+    void*    fsbase;
+    void*    pre_ocall_stack;
+    void*    ustack_top;
+    void*    ustack;
+    struct pal_handle_thread* thread;
+    uint64_t ocall_exit_called;
+    uint64_t thread_started;
+    uint64_t ready_for_exceptions;
+    uint64_t manifest_size;
+    void*    heap_min;
+    void*    heap_max;
+    void*    exec_addr;
+    uint64_t exec_size;
+    int*     clear_child_tid;
+    struct untrusted_area untrusted_area_cache;
 };
 
 #ifndef DEBUG
@@ -45,6 +54,11 @@ extern uint64_t dummy_debug_variable;
 #endif
 
 # ifdef IN_ENCLAVE
+
+static inline struct enclave_tls* get_tcb_trts(void) {
+    return (struct enclave_tls*)pal_get_tcb();
+}
+
 #  define GET_ENCLAVE_TLS(member)                                   \
     ({                                                              \
         struct enclave_tls * tmp;                                   \
@@ -69,9 +83,12 @@ extern uint64_t dummy_debug_variable;
 /* private to untrusted Linux PAL, unique to each untrusted thread */
 typedef struct pal_tcb_urts {
     struct pal_tcb_urts* self;
-    sgx_arch_tcs_t*     tcs;       /* TCS page of SGX corresponding to thread, for EENTER */
-    void*               stack;     /* bottom of stack, for later freeing when thread exits */
-    void*               alt_stack; /* bottom of alt stack, for child thread to init alt stack */
+    sgx_arch_tcs_t*     tcs;        /* TCS page of SGX corresponding to thread, for EENTER */
+    void*               stack;      /* bottom of stack, for later freeing when thread exits */
+    void*               alt_stack;  /* bottom of alt stack, for child thread to init alt stack */
+    atomic_ulong        eenter_cnt; /* # of EENTERs, corresponds to # of ECALLs */
+    atomic_ulong        eexit_cnt;  /* # of EEXITs, corresponds to # of OCALLs */
+    atomic_ulong        aex_cnt;    /* # of AEXs, corresponds to # of interrupts/signals */
 } PAL_TCB_URTS;
 
 extern void pal_tcb_urts_init(PAL_TCB_URTS* tcb, void* stack, void* alt_stack);
@@ -83,6 +100,9 @@ static inline PAL_TCB_URTS* get_tcb_urts(void) {
              : "i" (offsetof(PAL_TCB_URTS, self)));
     return tcb;
 }
+
+extern bool g_sgx_print_stats;
+void update_and_print_stats(bool process_wide);
 # endif
 
 #endif /* __SGX_TLS_H__ */

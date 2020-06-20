@@ -1,9 +1,20 @@
 include ../../../../Scripts/Makefile.configs
 include Makefile.am
 
-CFLAGS  += -I. -I../.. -I../../../include  -I../../../include/pal \
-	-I../../../include/host/Skeleton -I../../../include/lib
-ASFLAGS += -I. -I../.. -I../../../include
+CFLAGS  += \
+	-I. \
+	-I../.. \
+	-I../../../include  \
+	-I../../../include/arch/$(ARCH) \
+	-I../../../include/arch/$(ARCH)/$(PAL_HOST) \
+	-I../../../include/host/Skeleton \
+	-I../../../include/lib \
+	-I../../../include/pal
+
+ASFLAGS += \
+	-I. \
+	-I../.. \
+	-I../../../include
 
 host_files = libpal-Skeleton.a pal.map
 
@@ -29,7 +40,7 @@ include ../../../../Scripts/Makefile.rules
 
 .PHONY: clean
 clean:
-	rm -f $(addsuffix .o,$(objs)) $(addsuffix .d,$(objs)) $(host_files) $(pal_lib)
+	$(RM) $(addsuffix .o,$(objs)) $(addsuffix .d,$(objs)) $(host_files) $(pal_lib)
 
 .PHONY: distclean
 distclean: clean

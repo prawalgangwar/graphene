@@ -10,7 +10,17 @@
 #include "sgx_arch.h"
 #include "sgx_tls.h"
 
+/* sgx.h header from the Intel SGX driver assumes that `__packed` macro was defined */
+#ifndef __packed
+#define __packed __attribute__((packed))
+#endif
+#include "sgx.h"
+#undef __packed
+
 #include <generated-offsets-build.h>
+
+/* required due to -Wmissing-prototypes */
+void dummy(void);
 
 void dummy(void)
 {
@@ -101,6 +111,9 @@ void dummy(void)
 
     /* struct pal_tcb_urts aka PAL_TCB_URTS */
     OFFSET(PAL_TCB_URTS_TCS, pal_tcb_urts, tcs);
+    OFFSET(PAL_TCB_URTS_EENTER_CNT, pal_tcb_urts, eenter_cnt);
+    OFFSET(PAL_TCB_URTS_EEXIT_CNT, pal_tcb_urts, eexit_cnt);
+    OFFSET(PAL_TCB_URTS_AEX_CNT, pal_tcb_urts, aex_cnt);
 
     /* sgx_arch_tcs_t */
     OFFSET_T(TCS_FLAGS, sgx_arch_tcs_t, flags);
@@ -169,4 +182,12 @@ void dummy(void)
     OFFSET_T(XSAVE_HEADER_OFFSET, PAL_XREGS_STATE, header);
     DEFINE(PAL_XSTATE_ALIGN, PAL_XSTATE_ALIGN);
     DEFINE(PAL_FP_XSTATE_MAGIC2_SIZE, PAL_FP_XSTATE_MAGIC2_SIZE);
+
+    /* SGX_DCAP */
+#ifdef SGX_DCAP
+    DEFINE(SGX_DCAP, SGX_DCAP);
+#endif
+#ifdef SGX_DCAP_16_OR_LATER
+    DEFINE(SGX_DCAP_16_OR_LATER, SGX_DCAP_16_OR_LATER);
+#endif
 }

@@ -1,26 +1,65 @@
 include ../../../../Scripts/Makefile.configs
 include Makefile.am
 
-CFLAGS	+= -I. -Iinclude -I../.. -I../../../include -I../../../include/pal \
-	   -I../../../include/host/Linux -I../../../include/lib \
-	   -I../../../linux-kernel/graphene
-ASFLAGS += -I. -Iinclude -I../.. -I../../../include
+CFLAGS	+= \
+	-I. \
+	-Iinclude \
+	-I../.. \
+	-I../../../include \
+	-I../../../include/pal \
+	-I../../../include/arch/$(ARCH) \
+	-I../../../include/arch/$(ARCH)/Linux \
+	-I../../../include/host/Linux \
+	-I../../../include/host/Linux-common \
+	-I../../../include/lib
+
+ASFLAGS += \
+	-I. \
+	-Iinclude \
+	-I../.. \
+	-I../../../include \
+	-I../../../include/arch/$(ARCH)/Linux
 
 host_files = libpal-Linux.a pal.map
 
 defs	= -DIN_PAL -DPAL_DIR=$(PAL_DIR) -DRUNTIME_DIR=$(RUNTIME_DIR)
 CFLAGS += $(defs)
 ASFLAGS += $(defs)
-objs	= $(addprefix db_,files devices pipes eventfd sockets streams memory threading \
-	    mutex events process object main rtld misc \
-	    exception) clone-x86_64
+
+commons_objs = bogomips.o
+
+objs = \
+	clone-$(ARCH).o \
+	db_devices.o \
+	db_eventfd.o \
+	db_events.o \
+	db_exception.o \
+	db_files.o \
+	db_main.o \
+	db_main-$(ARCH).o \
+	db_memory.o \
+	db_misc.o \
+	db_mutex.o \
+	db_object.o \
+	db_pipes.o \
+	db_process.o \
+	db_rtld.o \
+	db_sockets.o \
+	db_streams.o \
+	db_threading.o \
+	$(commons_objs) \
+	pal_start-$(ARCH).o
+
 graphene_lib = .lib/graphene-lib.a
 
 .PHONY: all
 all: $(host_files)
 
-libpal-Linux.a: $(addsuffix .o,$(objs)) $(graphene_lib)
+libpal-Linux.a: $(objs) $(graphene_lib)
 	$(call cmd,ar_a_o)
+
+$(commons_objs): %.o: ../Linux-common/%.c
+	$(call cmd,cc_o_c)
 
 %.o: %.c
 	$(call cmd,cc_o_c)
@@ -40,16 +79,16 @@ libpal-Linux.a: $(addsuffix .o,$(objs)) $(graphene_lib)
 include ../../../../Scripts/Makefile.rules
 
 ifeq ($(filter %clean,$(MAKECMDGOALS)),)
--include $(addsuffix .d,$(objs)) $(addsuffix .i.d,$(objs)) $(addsuffix .s.d,$(objs))
+-include $(patsubst %.o,%.d,$(objs)) $(patsubst %.o,%.i.d,$(objs)) $(patsubst %.o,%.s.d,$(objs))
 endif
 
 CLEAN_FILES += $(notdir $(pal_static) $(pal_lib) $(pal_sec) $(pal_loader))
 
 .PHONY: clean
 clean:
-	rm -f $(addsuffix .o,$(objs)) $(host_files) $(CLEAN_FILES) \
-	      $(addsuffix .d,$(objs)) $(addsuffix .i.d,$(objs)) \
-	      $(addsuffix .s.d,$(objs))
+	$(RM) $(objs) $(host_files) $(CLEAN_FILES) \
+	      $(patsubst %.o,%.d,$(objs)) $(patsubst %.o,%.i.d,$(objs)) \
+	      $(patsubst %.o,%.s.d,$(objs))
 
 .PHONY: distclean
 distclean: clean

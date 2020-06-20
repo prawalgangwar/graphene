@@ -1,18 +1,5 @@
-/* Copyright (C) 2014 Stony Brook University
-   This file is part of Graphene Library OS.
-
-   Graphene Library OS is free software: you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public License
-   as published by the Free Software Foundation, either version 3 of the
-   License, or (at your option) any later version.
-
-   Graphene Library OS is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
+/* Copyright (C) 2014 Stony Brook University */
 
 /*
  * shim_msgget.c
@@ -31,8 +18,8 @@
 #include <shim_handle.h>
 #include <shim_internal.h>
 #include <shim_ipc.h>
-#include <shim_profile.h>
 #include <shim_sysv.h>
+#include <shim_table.h>
 #include <shim_unistd.h>
 #include <shim_utils.h>
 
@@ -51,8 +38,6 @@ static struct shim_lock msgq_list_lock;
 
 static int __load_msg_persist(struct shim_msg_handle* msgq, bool readmsg);
 static int __store_msg_persist(struct shim_msg_handle* msgq);
-
-DEFINE_PROFILE_CATEGORY(sysv_msg, );
 
 #define MSG_TO_HANDLE(msghdl) container_of((msghdl), struct shim_handle, info.msg)
 
@@ -265,7 +250,6 @@ int del_msg_handle(struct shim_msg_handle* msgq) {
 }
 
 int shim_do_msgget(key_t key, int msgflg) {
-    INC_PROFILE_OCCURENCE(syscall_use_ipc);
     IDTYPE msgid = 0;
     int ret;
 
@@ -361,7 +345,6 @@ out:
 }
 
 int shim_do_msgsnd(int msqid, const void* msgp, size_t msgsz, int msgflg) {
-    INC_PROFILE_OCCURENCE(syscall_use_ipc);
     // Issue #755 - https://github.com/oscarlab/graphene/issues/755
     __UNUSED(msgflg);
 
@@ -387,14 +370,14 @@ int shim_do_msgsnd(int msqid, const void* msgp, size_t msgsz, int msgflg) {
     if ((ret = connect_msg_handle(msqid, &msgq)) < 0)
         return ret;
 
+    // FIXME: This call crashes Graphene, causing NULL dereference in add_sysv_msg. Everything in
+    // this file seems to be broken, so probably better to just rewrite it?
     ret = add_sysv_msg(msgq, msgbuf->mtype, msgsz, msgbuf->mtext, NULL);
     put_msg_handle(msgq);
     return ret;
 }
 
 int shim_do_msgrcv(int msqid, void* msgp, size_t msgsz, long msgtype, int msgflg) {
-    INC_PROFILE_OCCURENCE(syscall_use_ipc);
-
     // Issue #755 - https://github.com/oscarlab/graphene/issues/755
     __UNUSED(msgflg);
 
@@ -421,8 +404,6 @@ int shim_do_msgrcv(int msqid, void* msgp, size_t msgsz, long msgtype, int msgflg
 }
 
 int shim_do_msgctl(int msqid, int cmd, struct msqid_ds* buf) {
-    INC_PROFILE_OCCURENCE(syscall_use_ipc);
-
     // Issue #756 - https://github.com/oscarlab/graphene/issues/756
     __UNUSED(buf);
 
@@ -578,14 +559,11 @@ static struct sysv_balance_policy msg_policy = {
 };
 #endif
 
-DEFINE_PROFILE_INTERVAL(add_sysv_msg, sysv_msg);
-
 int add_sysv_msg(struct shim_msg_handle* msgq, long type, size_t size, const void* data,
                  struct sysv_client* src) {
-    BEGIN_PROFILE_INTERVAL();
-
     struct shim_handle* hdl = MSG_TO_HANDLE(msgq);
-    int ret                 = 0;
+    int ret = 0;
+
     lock(&hdl->lock);
 
     if (msgq->deleted) {
@@ -595,6 +573,7 @@ int add_sysv_msg(struct shim_msg_handle* msgq, long type, size_t size, const voi
 
     if (!msgq->owned) {
         unlock(&hdl->lock);
+        assert(src);
         ret = ipc_sysv_msgsnd_send(src->port, src->vmid, msgq->msqid, type, data, size, src->seq);
         goto out;
     }
@@ -613,7 +592,6 @@ int add_sysv_msg(struct shim_msg_handle* msgq, long type, size_t size, const voi
 out_locked:
     unlock(&hdl->lock);
 out:
-    SAVE_PROFILE_INTERVAL(add_sysv_msg);
     return ret;
 }
 
@@ -651,12 +629,9 @@ static int __add_msg_req(struct shim_msg_handle* msgq, struct msg_type* mtype, i
     return 0;
 }
 
-DEFINE_PROFILE_INTERVAL(get_sysv_msg, sysv_msg);
-
 int get_sysv_msg(struct shim_msg_handle* msgq, long type, size_t size, void* data, int flags,
                  struct sysv_client* src) {
-    BEGIN_PROFILE_INTERVAL();
-    int ret                   = 0;
+    int ret = 0;
     struct shim_handle* hdl   = MSG_TO_HANDLE(msgq);
     struct msg_item* msg      = NULL;
     struct msg_type* alltypes = NULL;
@@ -742,7 +717,6 @@ int get_sysv_msg(struct shim_msg_handle* msgq, long type, size_t size, void* dat
 out_locked:
     unlock(&hdl->lock);
 out:
-    SAVE_PROFILE_INTERVAL(get_sysv_msg);
     return ret;
 }
 
@@ -759,7 +733,7 @@ static int __store_msg_persist(struct shim_msg_handle* msgq) {
 
     PAL_HANDLE file = DkStreamOpen(fileuri, PAL_ACCESS_RDWR, 0600, PAL_CREATE_TRY, 0);
     if (!file) {
-        ret = -PAL_ERRNO;
+        ret = -PAL_ERRNO();
         goto out;
     }
 
@@ -847,7 +821,7 @@ static int __load_msg_persist(struct shim_msg_handle* msgq, bool readmsg) {
     size_t bytes = DkStreamRead(file, 0, sizeof(struct msg_handle_backup), &mback, NULL, 0);
 
     if (bytes == PAL_STREAM_ERROR) {
-        ret = -PAL_ERRNO;
+        ret = -PAL_ERRNO();
         goto out;
     }
     if (bytes < sizeof(struct msg_handle_backup)) {
@@ -866,7 +840,7 @@ static int __load_msg_persist(struct shim_msg_handle* msgq, bool readmsg) {
     void* mem = (void*)DkStreamMap(file, NULL, PAL_PROT_READ, 0, ALLOC_ALIGN_UP(expected_size));
 
     if (!mem) {
-        ret = -PAL_ERRNO;
+        ret = -PAL_ERRNO();
         goto out;
     }
 

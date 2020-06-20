@@ -1,18 +1,5 @@
-/* Copyright (C) 2014 Stony Brook University
-   This file is part of Graphene Library OS.
-
-   Graphene Library OS is free software: you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public License
-   as published by the Free Software Foundation, either version 3 of the
-   License, or (at your option) any later version.
-
-   Graphene Library OS is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
+/* Copyright (C) 2014 Stony Brook University */
 
 /*
  * shim_handle.h
@@ -86,11 +73,6 @@ struct shim_file_handle {
     enum shim_file_type type;
     off_t size;
     off_t marker;
-
-    enum { FILEBUF_MAP, FILEBUF_NONE } buf_type;
-    size_t mapsize;
-    off_t mapoffset;
-    void* mapbuf;
 };
 
 #define FILE_HANDLE_DATA(hdl)  ((hdl)->info.file.data)
@@ -132,11 +114,8 @@ struct shim_dev_handle {
 };
 
 struct shim_pipe_handle {
-#if USE_SIMPLE_PIPE == 1
-    struct shim_handle* pair;
-#else
-    IDTYPE pipeid;
-#endif
+    bool ready_for_ops; /* true for pipes, false for FIFOs that were mknod'ed but not open'ed */
+    char name[PIPE_URI_SIZE];
 };
 
 #define SOCK_STREAM   1
@@ -168,10 +147,6 @@ enum shim_sock_state {
     SOCK_SHUTDOWN,
 };
 
-struct shim_unix_data {
-    unsigned int pipeid;
-};
-
 struct shim_sock_handle {
     int domain;
     int sock_type;
@@ -195,8 +170,7 @@ struct shim_sock_handle {
         // UNIX addr
         struct addr_unix {
             struct shim_dentry* dentry;
-            unsigned int pipeid;
-            struct shim_unix_data* data;
+            char name[PIPE_URI_SIZE];
         } un;
     } addr;
 
@@ -364,7 +338,7 @@ struct shim_handle {
 
     struct shim_dir_handle dir_info;
 
-    int flags;
+    int flags; /* Linux' O_* flags */
     int acc_mode;
     IDTYPE owner;
     struct shim_lock lock;
@@ -414,8 +388,8 @@ struct shim_handle* get_fd_handle(FDTYPE fd, int* flags, struct shim_handle_map*
  * Creates mapping for the given handle to a new file descriptor which is then returned.
  * Uses the lowest, non-negative available number for the new fd.
  */
-int set_new_fd_handle(struct shim_handle* hdl, int flags, struct shim_handle_map* map);
-int set_new_fd_handle_by_fd(FDTYPE fd, struct shim_handle* hdl, int flags,
+int set_new_fd_handle(struct shim_handle* hdl, int fd_flags, struct shim_handle_map* map);
+int set_new_fd_handle_by_fd(FDTYPE fd, struct shim_handle* hdl, int fd_flags,
                             struct shim_handle_map* map);
 struct shim_handle* __detach_fd_handle(struct shim_fd_handle* fd, int* flags,
                                        struct shim_handle_map* map);

@@ -1,18 +1,5 @@
-/* Copyright (C) 2014 Stony Brook University
-   This file is part of Graphene Library OS.
-
-   Graphene Library OS is free software: you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public License
-   as published by the Free Software Foundation, either version 3 of the
-   License, or (at your option) any later version.
-
-   Graphene Library OS is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
+/* Copyright (C) 2014 Stony Brook University */
 
 /*
  * db_files.c
@@ -24,6 +11,7 @@
 #include "pal_defs.h"
 #include "pal_linux_defs.h"
 #include "pal.h"
+#include "pal_flags_conv.h"
 #include "pal_internal.h"
 #include "pal_linux.h"
 #include "pal_linux_error.h"
@@ -38,38 +26,43 @@ typedef __kernel_pid_t pid_t;
 #include <asm/errno.h>
 
 /* 'open' operation for file streams */
-static int file_open (PAL_HANDLE * handle, const char * type, const char * uri,
-                      int access, int share, int create, int options)
-{
+static int file_open(PAL_HANDLE* handle, const char* type, const char* uri, int access, int share,
+                     int create, int options) {
     if (strcmp_static(type, URI_TYPE_FILE))
         return -PAL_ERROR_INVAL;
 
+    assert(WITHIN_MASK(access,  PAL_ACCESS_MASK));
+    assert(WITHIN_MASK(share,   PAL_SHARE_MASK));
+    assert(WITHIN_MASK(create,  PAL_CREATE_MASK));
+    assert(WITHIN_MASK(options, PAL_OPTION_MASK));
+
     /* try to do the real open */
-    int ret = INLINE_SYSCALL(open, 3, uri,
-                             HOST_ACCESS(access)|create|options|O_CLOEXEC,
+    // FIXME: No idea why someone hardcoded O_CLOEXEC here. We should drop it and carefully
+    // investigate if this causes any descriptor leaks.
+    int ret = INLINE_SYSCALL(open, 3, uri, PAL_ACCESS_TO_LINUX_OPEN(access)  |
+                                           PAL_CREATE_TO_LINUX_OPEN(create)  |
+                                           PAL_OPTION_TO_LINUX_OPEN(options) |
+                                           O_CLOEXEC,
                              share);
 
     if (IS_ERR(ret))
         return unix_to_pal_error(ERRNO(ret));
 
     /* if try_create_path succeeded, prepare for the file handle */
-    size_t len = strlen(uri);
-    PAL_HANDLE hdl = malloc(HANDLE_SIZE(file) + len + 1);
+    size_t uri_size = strlen(uri) + 1;
+    PAL_HANDLE hdl = malloc(HANDLE_SIZE(file) + uri_size);
     SET_HANDLE_TYPE(hdl, file);
     HANDLE_HDR(hdl)->flags |= RFD(0)|WFD(0);
     hdl->file.fd = ret;
-    hdl->file.offset = 0;
     hdl->file.map_start = NULL;
-    char * path = (void *) hdl + HANDLE_SIZE(file);
-    memcpy(path, uri, len + 1);
-    hdl->file.realpath = (PAL_STR) path;
+    char* path = (void*)hdl + HANDLE_SIZE(file);
+    ret = get_norm_path(uri, path, &uri_size);
+    if (ret < 0)
+        return ret;
+    hdl->file.realpath = (PAL_STR)path;
     *handle = hdl;
     return 0;
 }
-
-#ifndef SEEK_SET
-# define SEEK_SET 0
-#endif
 
 /* 'read' operation for file streams. */
 static int64_t file_read (PAL_HANDLE handle, uint64_t offset, uint64_t count,
@@ -78,20 +71,11 @@ static int64_t file_read (PAL_HANDLE handle, uint64_t offset, uint64_t count,
     int fd = handle->file.fd;
     int64_t ret;
 
-    if (handle->file.offset != offset) {
-        ret = INLINE_SYSCALL(lseek, 3, fd, offset, SEEK_SET);
-        if (IS_ERR(ret))
-            return -PAL_ERROR_DENIED;
-
-        handle->file.offset = offset;
-    }
-
-    ret = INLINE_SYSCALL(read, 3, fd, buffer, count);
+    ret = INLINE_SYSCALL(pread64, 4, fd, buffer, count, offset);
 
     if (IS_ERR(ret))
         return unix_to_pal_error(ERRNO(ret));
 
-    handle->file.offset = offset + ret;
     return ret;
 }
 
@@ -102,20 +86,11 @@ static int64_t file_write (PAL_HANDLE handle, uint64_t offset, uint64_t count,
     int fd = handle->file.fd;
     int64_t ret;
 
-    if (handle->file.offset != offset) {
-        ret = INLINE_SYSCALL(lseek, 3, fd, offset, SEEK_SET);
-        if (IS_ERR(ret))
-            return -PAL_ERROR_DENIED;
-
-        handle->file.offset = offset;
-    }
-
-    ret = INLINE_SYSCALL(write, 3, fd, buffer, count);
+    ret = INLINE_SYSCALL(pwrite64, 4, fd, buffer, count, offset);
 
     if (IS_ERR(ret))
         return unix_to_pal_error(ERRNO(ret));
 
-    handle->file.offset = offset + ret;
     return ret;
 }
 
@@ -148,11 +123,9 @@ static int file_delete (PAL_HANDLE handle, int access)
 }
 
 /* 'map' operation for file stream. */
-static int file_map (PAL_HANDLE handle, void ** addr, int prot,
-                     uint64_t offset, uint64_t size)
-{
+static int file_map(PAL_HANDLE handle, void** addr, int prot, uint64_t offset, uint64_t size) {
     int fd = handle->file.fd;
-    void * mem = *addr;
+    void* mem = *addr;
     /*
      * work around for fork emulation
      * the first exec image to be loaded has to be at same address
@@ -163,12 +136,11 @@ static int file_map (PAL_HANDLE handle, void ** addr, int prot,
         /* this address is used. don't over-map it later */
         handle->file.map_start = NULL;
     }
-    int flags = MAP_FILE|HOST_FLAGS(0, prot)|(mem ? MAP_FIXED : 0);
-    prot = HOST_PROT(prot);
+    int flags = MAP_FILE | PAL_MEM_FLAGS_TO_LINUX(0, prot) | (mem ? MAP_FIXED : 0);
+    prot = PAL_PROT_TO_LINUX(prot);
 
-    /* The memory will always allocated with flag MAP_PRIVATE
-       and MAP_FILE */
-    mem = (void *) ARCH_MMAP(mem, size, prot, flags, fd, offset);
+    /* The memory will always be allocated with flag MAP_PRIVATE and MAP_FILE */
+    mem = (void*)ARCH_MMAP(mem, size, prot, flags, fd, offset);
 
     if (IS_ERR_P(mem))
         return -PAL_ERROR_DENIED;
@@ -319,7 +291,7 @@ static int file_getname (PAL_HANDLE handle, char * buffer, size_t count)
     return tmp + len - buffer;
 }
 
-const char * file_getrealpath (PAL_HANDLE handle)
+static const char* file_getrealpath (PAL_HANDLE handle)
 {
     return handle->file.realpath;
 }
@@ -344,9 +316,8 @@ struct handle_ops file_ops = {
 /* 'open' operation for directory stream. Directory stream does not have a
    specific type prefix, its URI looks the same file streams, plus it
    ended with slashes. dir_open will be called by file_open. */
-static int dir_open (PAL_HANDLE * handle, const char * type, const char * uri,
-                     int access, int share, int create, int options)
-{
+static int dir_open(PAL_HANDLE* handle, const char* type, const char* uri, int access, int share,
+                    int create, int options) {
     if (strcmp_static(type, URI_TYPE_DIR))
         return -PAL_ERROR_INVAL;
     if (!WITHIN_MASK(access, PAL_ACCESS_MASK))
@@ -354,15 +325,20 @@ static int dir_open (PAL_HANDLE * handle, const char * type, const char * uri,
 
     int ret = 0;
 
-    if (create & PAL_CREATE_TRY) {
+    if (create & PAL_CREATE_TRY || create & PAL_CREATE_ALWAYS) {
         ret = INLINE_SYSCALL(mkdir, 2, uri, share);
 
-        if (IS_ERR(ret) && ERRNO(ret) == EEXIST &&
-            create & PAL_CREATE_ALWAYS)
-            return -PAL_ERROR_STREAMEXIST;
+        if (IS_ERR(ret)) {
+            if (ERRNO(ret) == EEXIST && create & PAL_CREATE_ALWAYS)
+                return -PAL_ERROR_STREAMEXIST;
+            if (ERRNO(ret) != EEXIST)
+                return unix_to_pal_error(ERRNO(ret));
+            assert(ERRNO(ret) == EEXIST && create & PAL_CREATE_TRY);
+        }
     }
 
-    ret = INLINE_SYSCALL(open, 3, uri, O_DIRECTORY|options|O_CLOEXEC, 0);
+    ret = INLINE_SYSCALL(open, 3, uri, O_DIRECTORY | PAL_OPTION_TO_LINUX_OPEN(options) | O_CLOEXEC,
+                         0);
 
     if (IS_ERR(ret))
         return unix_to_pal_error(ERRNO(ret));
@@ -372,7 +348,7 @@ static int dir_open (PAL_HANDLE * handle, const char * type, const char * uri,
     SET_HANDLE_TYPE(hdl, dir);
     HANDLE_HDR(hdl)->flags |= RFD(0);
     hdl->dir.fd = ret;
-    char * path = (void *) hdl + HANDLE_SIZE(dir);
+    char* path = (void*)hdl + HANDLE_SIZE(dir);
     memcpy(path, uri, len + 1);
     hdl->dir.realpath = (PAL_STR) path;
     hdl->dir.buf = (PAL_PTR) NULL;

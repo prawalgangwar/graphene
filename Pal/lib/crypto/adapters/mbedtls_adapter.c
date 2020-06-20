@@ -1,22 +1,9 @@
-/* Copyright (C) 2017 Fortanix, Inc.
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
+/* Copyright (C) 2017 Fortanix, Inc. */
 
-   This file is part of Graphene Library OS.
-
-   Graphene Library OS is free software: you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public License
-   as published by the Free Software Foundation, either version 3 of the
-   License, or (at your option) any later version.
-
-   Graphene Library OS is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+#include "mbedtls_adapter.h"
 
 #include <errno.h>
-#include <immintrin.h>
 #include <limits.h>
 #include <stdint.h>
 
@@ -28,10 +15,12 @@
 #include "assert.h"
 #include "mbedtls/aes.h"
 #include "mbedtls/cmac.h"
+#include "mbedtls/entropy_poll.h"
 #include "mbedtls/error.h"
 #include "mbedtls/net_sockets.h"
 #include "mbedtls/rsa.h"
 #include "mbedtls/sha256.h"
+#include "rng-arch.h"
 
 int mbedtls_to_pal_error(int error)
 {
@@ -65,6 +54,8 @@ int mbedtls_to_pal_error(int error)
         case MBEDTLS_ERR_CIPHER_ALLOC_FAILED:
         case MBEDTLS_ERR_DHM_ALLOC_FAILED:
         case MBEDTLS_ERR_MD_ALLOC_FAILED:
+        case MBEDTLS_ERR_SSL_ALLOC_FAILED:
+        case MBEDTLS_ERR_PK_ALLOC_FAILED:
             return -PAL_ERROR_NOMEM;
 
         case MBEDTLS_ERR_CIPHER_INVALID_PADDING:
@@ -102,6 +93,15 @@ int mbedtls_to_pal_error(int error)
 
         case MBEDTLS_ERR_RSA_RNG_FAILED:
             return -PAL_ERROR_CRYPTO_RNG_FAILED;
+
+        case MBEDTLS_ERR_SSL_WANT_READ:
+        case MBEDTLS_ERR_SSL_WANT_WRITE:
+        case MBEDTLS_ERR_SSL_ASYNC_IN_PROGRESS:
+        case MBEDTLS_ERR_SSL_CRYPTO_IN_PROGRESS:
+            return -PAL_ERROR_TRYAGAIN;
+
+        case MBEDTLS_ERR_NET_CONN_RESET:
+            return -PAL_ERROR_CONNFAILED_PIPE;
 
         default:
             return -PAL_ERROR_DENIED;
@@ -324,8 +324,7 @@ int mbedtls_hardware_poll(void* data, unsigned char* output, size_t len, size_t*
 
     unsigned long long rand64;
     for (size_t i = 0; i < len; i += sizeof(rand64)) {
-        while (__builtin_ia32_rdrand64_step(&rand64) == 0)
-            /*nop*/;
+        rand64 = get_rand64();
         size_t over = i + sizeof(rand64) < len ? 0 : i + sizeof(rand64) - len;
         memcpy(output + i, &rand64, sizeof(rand64) - over);
     }
@@ -340,16 +339,17 @@ static int recv_cb(void* ctx, uint8_t* buf, size_t len) {
     if (fd < 0)
         return MBEDTLS_ERR_NET_INVALID_CONTEXT;
 
-    if (len != (uint32_t)len) {
+    if (len > INT_MAX) {
         /* pal_recv_cb cannot receive more than 32-bit limit, trim len to fit in 32-bit */
-        len = UINT32_MAX;
+        len = INT_MAX;
     }
-
-    int ret = ssl_ctx->pal_recv_cb(fd, buf, (uint32_t)len);
+    ssize_t ret = ssl_ctx->pal_recv_cb(fd, buf, len);
 
     if (ret < 0) {
-        if (ret == -EINTR)
+        if (ret == -EINTR || ret == -EAGAIN || ret == -EWOULDBLOCK)
             return MBEDTLS_ERR_SSL_WANT_READ;
+        if (ret == -EPIPE)
+            return MBEDTLS_ERR_NET_CONN_RESET;
         return MBEDTLS_ERR_NET_RECV_FAILED;
     }
 
@@ -362,25 +362,28 @@ static int send_cb(void* ctx, uint8_t const* buf, size_t len) {
     if (fd < 0)
         return MBEDTLS_ERR_NET_INVALID_CONTEXT;
 
-    if (len != (uint32_t)len) {
+    if (len > INT_MAX) {
         /* pal_send_cb cannot send more than 32-bit limit, trim len to fit in 32-bit */
-        len = UINT32_MAX;
+        len = INT_MAX;
     }
-
-    int ret = ssl_ctx->pal_send_cb(fd, buf, (uint32_t)len);
+    ssize_t ret = ssl_ctx->pal_send_cb(fd, buf, len);
     if (ret < 0) {
-        if (ret == -EINTR)
+        if (ret == -EINTR || ret == -EAGAIN || ret == -EWOULDBLOCK)
             return MBEDTLS_ERR_SSL_WANT_WRITE;
+        if (ret == -EPIPE)
+            return MBEDTLS_ERR_NET_CONN_RESET;
         return MBEDTLS_ERR_NET_SEND_FAILED;
     }
 
     return ret;
 }
 
+/*! This function is not thread-safe; caller is responsible for proper synchronization. */
 int lib_SSLInit(LIB_SSL_CONTEXT* ssl_ctx, int stream_fd, bool is_server,
                 const uint8_t* psk, size_t psk_size,
-                int (*pal_recv_cb)(int fd, void* buf, uint32_t len),
-                int (*pal_send_cb)(int fd, const void* buf, uint32_t len)) {
+                ssize_t (*pal_recv_cb)(int fd, void* buf, size_t len),
+                ssize_t (*pal_send_cb)(int fd, const void* buf, size_t len),
+                const uint8_t* buf_load_ssl_ctx, size_t buf_size) {
     int ret;
 
     memset(ssl_ctx, 0, sizeof(*ssl_ctx));
@@ -399,14 +402,14 @@ int lib_SSLInit(LIB_SSL_CONTEXT* ssl_ctx, int stream_fd, bool is_server,
 
     ret = mbedtls_ctr_drbg_seed(&ssl_ctx->ctr_drbg, mbedtls_entropy_func, &ssl_ctx->entropy, NULL, 0);
     if (ret != 0)
-        return -PAL_ERROR_DENIED;
+        return mbedtls_to_pal_error(ret);
 
     ret = mbedtls_ssl_config_defaults(&ssl_ctx->conf,
                                       is_server ? MBEDTLS_SSL_IS_SERVER : MBEDTLS_SSL_IS_CLIENT,
                                       MBEDTLS_SSL_TRANSPORT_STREAM,
                                       MBEDTLS_SSL_PRESET_DEFAULT);
     if (ret != 0)
-        return -PAL_ERROR_DENIED;
+        return mbedtls_to_pal_error(ret);
 
     mbedtls_ssl_conf_rng(&ssl_ctx->conf, mbedtls_ctr_drbg_random, &ssl_ctx->ctr_drbg);
     mbedtls_ssl_conf_ciphersuites(&ssl_ctx->conf, ssl_ctx->ciphersuites);
@@ -414,20 +417,20 @@ int lib_SSLInit(LIB_SSL_CONTEXT* ssl_ctx, int stream_fd, bool is_server,
     const unsigned char psk_identity[] = "dummy";
     ret = mbedtls_ssl_conf_psk(&ssl_ctx->conf, psk, psk_size, psk_identity, sizeof(psk_identity) - 1);
     if (ret != 0)
-        return -PAL_ERROR_DENIED;
+        return mbedtls_to_pal_error(ret);
 
     ret = mbedtls_ssl_setup(&ssl_ctx->ssl, &ssl_ctx->conf);
     if (ret != 0)
-        return -PAL_ERROR_DENIED;
+        return mbedtls_to_pal_error(ret);
 
     mbedtls_ssl_set_bio(&ssl_ctx->ssl, ssl_ctx, send_cb, recv_cb, NULL);
 
-    while ((ret = mbedtls_ssl_handshake(&ssl_ctx->ssl)) != 0) {
-        if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE)
-            break;
+    if (buf_load_ssl_ctx && buf_size) {
+        /* SSL context was serialized, must be restored from the supplied buffer */
+        ret = mbedtls_ssl_context_load(&ssl_ctx->ssl, buf_load_ssl_ctx, buf_size);
+        if (ret != 0)
+            return mbedtls_to_pal_error(ret);
     }
-    if (ret != 0)
-        return -PAL_ERROR_DENIED;
 
     return 0;
 }
@@ -440,16 +443,38 @@ int lib_SSLFree(LIB_SSL_CONTEXT* ssl_ctx) {
     return 0;
 }
 
+int lib_SSLHandshake(LIB_SSL_CONTEXT* ssl_ctx) {
+    int ret;
+    while ((ret = mbedtls_ssl_handshake(&ssl_ctx->ssl)) != 0) {
+        if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE)
+            break;
+    }
+    if (ret != 0)
+        return mbedtls_to_pal_error(ret);
+
+    return 0;
+}
+
 int lib_SSLRead(LIB_SSL_CONTEXT* ssl_ctx, uint8_t* buf, size_t len) {
     int ret = mbedtls_ssl_read(&ssl_ctx->ssl, buf, len);
-    if (ret <= 0)
-       return -PAL_ERROR_DENIED;
+    if (ret < 0)
+       return mbedtls_to_pal_error(ret);
     return ret;
 }
 
 int lib_SSLWrite(LIB_SSL_CONTEXT* ssl_ctx, const uint8_t* buf, size_t len) {
     int ret = mbedtls_ssl_write(&ssl_ctx->ssl, buf, len);
-    if (ret <= 0)
-       return -PAL_ERROR_DENIED;
+    if (ret < 0)
+       return mbedtls_to_pal_error(ret);
     return ret;
+}
+
+int lib_SSLSave(LIB_SSL_CONTEXT* ssl_ctx, uint8_t* buf, size_t len, size_t* olen) {
+    int ret = mbedtls_ssl_context_save(&ssl_ctx->ssl, buf, len, olen);
+    if (ret == MBEDTLS_ERR_SSL_BUFFER_TOO_SMALL) {
+        return -PAL_ERROR_NOMEM;
+    } else if (ret < 0) {
+        return -PAL_ERROR_DENIED;
+    }
+    return 0;
 }

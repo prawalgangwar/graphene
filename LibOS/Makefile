@@ -1,7 +1,7 @@
 include ../Scripts/Makefile.configs
 include ../Scripts/Makefile.rules
 
-GLIBC_VERSION ?= 2.27
+GLIBC_VERSION ?= 2.31
 GLIBC_SRC = glibc-$(GLIBC_VERSION)
 GLIBC_CHECKSUM = $(firstword $(shell grep $(GLIBC_SRC).tar.gz glibc-checksums))
 SHIM_DIR = shim
@@ -12,7 +12,6 @@ GLIBC_LIBS = \
 	csu/crti.o \
 	csu/crtn.o \
 	dlfcn/libdl.so.2 \
-	elf/ld-linux-x86-64.so.2 \
 	libc.so \
 	libc.so.6 \
 	libos/liblibos.so.1 \
@@ -23,10 +22,14 @@ GLIBC_LIBS = \
 	resolv/libnss_dns.so.2 \
 	resolv/libresolv.so.2 \
 	rt/librt.so.1
+ifeq ($(ARCH),x86_64)
+GLIBC_LIBS += elf/ld-linux-x86-64.so.2
+endif
+
 GLIBC_TARGET = $(addprefix $(BUILD_DIR)/, $(GLIBC_LIBS))
 GLIBC_RUNTIME = $(addprefix $(RUNTIME_DIR)/, $(notdir $(GLIBC_TARGET)))
 
-GLIBC_CFLAGS = -O2 -U_FORTIFY_SOURCE -fno-stack-protector -Wno-unused-value
+GLIBC_CFLAGS = -O2 -Wp,-U_FORTIFY_SOURCE -fno-stack-protector -Wno-unused-value
 ifeq ($(DEBUG),1)
 	GLIBC_CFLAGS += -g
 endif
@@ -74,11 +77,9 @@ GLIBC_MIRRORS ?= https://ftp.gnu.org/gnu/ \
 GLIBC_PATCHES = \
 	glibc-patches/$(GLIBC_SRC).patch \
 	glibc-patches/syscalldb-api.patch \
-	glibc-patches/liblibos.patch \
-	glibc-patches/malloc-arena-size.patch
+	glibc-patches/liblibos.patch
 
 GLIBC_PATCHES_2.23 = \
-	glibc-patches/liblibos-2.23+.patch \
 	glibc-patches/hp-timing-2.23+.patch \
 	glibc-patches/dangling-else.patch \
 	glibc-patches/cvs-common-symbols.patch \
@@ -87,8 +88,10 @@ GLIBC_PATCHES_2.23 = \
 	glibc-patches/nis-bogus-conditional.patch
 
 GLIBC_PATCHES_2.27 = \
-	glibc-patches/liblibos-2.23+.patch \
 	glibc-patches/hp-timing-2.23+.patch
+
+GLIBC_PATCHES_2.31 = \
+	glibc-patches/hp-timing-2.31.patch
 
 ifneq ($(filter %.gold,$(shell readlink -f /usr/bin/ld)),)
 GLIBC_PATCHES += glibc-patches/ld-gold.patch
@@ -97,7 +100,7 @@ endif
 GLIBC_PATCHES += $(GLIBC_PATCHES_$(GLIBC_VERSION))
 
 $(GLIBC_SRC)/configure: $(GLIBC_PATCHES) $(GLIBC_SRC).tar.gz
-	rm -rf $(GLIBC_SRC)
+	$(RM) -r $(GLIBC_SRC)
 	tar -xzf $(GLIBC_SRC).tar.gz
 	cd $(GLIBC_SRC) && \
 	for p in $(GLIBC_PATCHES); do \
@@ -117,7 +120,7 @@ $(GLIBC_SRC)/dlfcn/Versions: $(GLIBC_SRC)/configure
 
 .PHONY: clean_
 clean_:
-	rm -rf $(BUILD_DIR) $(GLIBC_SRC) build.log
+	$(RM) -r $(BUILD_DIR) $(GLIBC_SRC) build.log
 
 .PHONY: clean
 clean: clean_
@@ -126,7 +129,7 @@ clean: clean_
 .PHONY: distclean
 distclean: clean_
 	$(MAKE) -C $(SHIM_DIR) distclean
-	rm -f $(GLIBC_SRC).tar.gz
+	$(RM) $(GLIBC_SRC).tar.gz
 
 else
 .IGNORE: $(GLIBC_TARGET)
@@ -134,7 +137,7 @@ $(GLIBC_TARGET):
 
 .PHONY: clean
 clean:
-	rm -rf $(BUILD_DIR)
+	$(RM) -r $(BUILD_DIR)
 
 .PHONY: distclean
 distclean: clean

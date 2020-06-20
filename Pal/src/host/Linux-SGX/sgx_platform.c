@@ -1,36 +1,46 @@
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
 /* Copyright (C) 2019, Texas A&M University.
-
-   This file is part of Graphene Library OS.
-
-   Graphene Library OS is free software: you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public License
-   as published by the Free Software Foundation, either version 3 of the
-   License, or (at your option) any later version.
-
-   Graphene Library OS is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
-
-#include <pal_linux.h>
-#include <pal_rtld.h>
-#include <pal_crypto.h>
-#include <hex.h>
-
-#include "sgx_internal.h"
-#include "sgx_arch.h"
-#include "sgx_enclave.h"
-#include "sgx_attest.h"
-#include "quote/aesm.pb-c.h"
+ *               2020, Intel Labs.
+ */
 
 #include <asm/errno.h>
-#include <linux/fs.h>
 #include <linux/un.h>
-#define __USE_XOPEN2K8
-#include <stdlib.h>
+#include <stdbool.h>
+
+#include "gsgx.h"
+#include "quote/aesm.pb-c.h"
+#include "sgx_attest.h"
+#include "sgx_internal.h"
+
+#ifdef SGX_DCAP
+/* hard-coded production attestation key of Intel reference QE (the only supported one) */
+/* FIXME: should allow other attestation keys from non-Intel QEs */
+static const sgx_ql_att_key_id_t g_default_ecdsa_p256_att_key_id = {
+    .id               = 0,
+    .version          = 0,
+    .mrsigner_length  = 32,
+    .mrsigner         = { 0x8c, 0x4f, 0x57, 0x75, 0xd7, 0x96, 0x50, 0x3e,
+                          0x96, 0x13, 0x7f, 0x77, 0xc6, 0x8a, 0x82, 0x9a,
+                          0x00, 0x56, 0xac, 0x8d, 0xed, 0x70, 0x14, 0x0b,
+                          0x08, 0x1b, 0x09, 0x44, 0x90, 0xc5, 0x7b, 0xff,
+                          0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                          0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
+    .prod_id          = 1,
+    .extended_prod_id = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                          0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
+    .config_id        = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                          0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                          0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                          0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                          0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                          0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                          0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                          0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
+    .family_id        = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                          0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
+    .algorithm_id     = SGX_QL_ALG_ECDSA_P256,
+};
+#endif
 
 /*
  * Connect to the AESM service to interact with the architectural enclave. Must reconnect
@@ -75,7 +85,6 @@ err:
  * back to the caller.
  */
 static int request_aesm_service(Request* req, Response** res) {
-
     int aesm_socket = connect_aesm_service();
     if (aesm_socket < 0)
         return aesm_socket;
@@ -109,12 +118,27 @@ err:
     return -ERRNO(ret);
 }
 
-// Retrieve the targetinfo for the AESM enclave for generating the local attestation report.
-int init_aesm_targetinfo(sgx_target_info_t* aesm_targetinfo) {
-
+int init_quoting_enclave_targetinfo(sgx_target_info_t* qe_target_info) {
     Request req = REQUEST__INIT;
+
+#ifdef SGX_DCAP
+    sgx_att_key_id_t default_att_key_id;
+    memset(&default_att_key_id, 0, sizeof(default_att_key_id));
+    memcpy(&default_att_key_id, &g_default_ecdsa_p256_att_key_id,
+           sizeof(g_default_ecdsa_p256_att_key_id));
+
+    Request__InitQuoteExRequest initexreq = REQUEST__INIT_QUOTE_EX_REQUEST__INIT;
+    initexreq.has_att_key_id  = true;
+    initexreq.att_key_id.data = (uint8_t*)&default_att_key_id;
+    initexreq.att_key_id.len  = sizeof(default_att_key_id);
+    initexreq.b_pub_key_id    = true;
+    initexreq.has_buf_size    = true;
+    initexreq.buf_size        = SGX_HASH_SIZE;
+    req.initquoteexreq = &initexreq;
+#else
     Request__InitQuoteRequest initreq = REQUEST__INIT_QUOTE_REQUEST__INIT;
     req.initquotereq = &initreq;
+#endif
 
     Response* res = NULL;
     int ret = request_aesm_service(&req, &res);
@@ -122,360 +146,146 @@ int init_aesm_targetinfo(sgx_target_info_t* aesm_targetinfo) {
         return ret;
 
     ret = -EPERM;
+#ifdef SGX_DCAP
+    if (!res->initquoteexres) {
+#else
     if (!res->initquoteres) {
+#endif
         SGX_DBG(DBG_E, "aesm_service returned wrong message\n");
         goto failed;
     }
 
+#ifdef SGX_DCAP
+    Response__InitQuoteExResponse* r = res->initquoteexres;
+#else
     Response__InitQuoteResponse* r = res->initquoteres;
+#endif
     if (r->errorcode != 0) {
         SGX_DBG(DBG_E, "aesm_service returned error: %d\n", r->errorcode);
         goto failed;
     }
 
-    if (r->targetinfo.len != sizeof(*aesm_targetinfo)) {
-        SGX_DBG(DBG_E, "aesm_service returned invalid target info\n");
+#ifdef SGX_DCAP
+    if (r->target_info.len != sizeof(*qe_target_info)) {
+#else
+    if (r->targetinfo.len != sizeof(*qe_target_info)) {
+#endif
+        SGX_DBG(DBG_E, "Quoting Enclave returned invalid target info\n");
         goto failed;
     }
 
-    memcpy(aesm_targetinfo, r->targetinfo.data, sizeof(*aesm_targetinfo));
+#ifdef SGX_DCAP
+    memcpy(qe_target_info, r->target_info.data, sizeof(*qe_target_info));
+#else
+    memcpy(qe_target_info, r->targetinfo.data, sizeof(*qe_target_info));
+#endif
     ret = 0;
 failed:
     response__free_unpacked(res, NULL);
     return ret;
 }
 
-/*
- * Contact to Intel Attestation Service and retrieve the signed attestation report
- *
- * @subkey:      SPID subscription key.
- * @nonce:       Random nonce generated in the enclave.
- * @quote:       Platform quote retrieved from AESMD.
- * @attestation: Attestation data to be returned to the enclave.
- */
-int contact_intel_attest_service(const char* subkey, const sgx_quote_nonce_t* nonce,
-                                 const sgx_quote_t* quote, sgx_attestation_t* attestation) {
-
-    size_t quote_len = sizeof(sgx_quote_t) + quote->sig_len;
-    size_t quote_str_len;
-    lib_Base64Encode((uint8_t*)quote, quote_len, NULL, &quote_str_len);
-    char* quote_str = __alloca(quote_str_len);
-    int ret = lib_Base64Encode((uint8_t*)quote, quote_len, quote_str, &quote_str_len);
-    if (ret < 0)
-        return ret;
-
-    size_t nonce_str_len = sizeof(sgx_quote_nonce_t) * 2 + 1;
-    char* nonce_str = __alloca(nonce_str_len);
-    __bytes2hexstr((void *)nonce, sizeof(sgx_quote_nonce_t), nonce_str, nonce_str_len);
-
-    // Create two temporary files for dumping the header and output of HTTPS request to IAS
-    char    https_header_path[] = "/tmp/gsgx-ias-header-XXXXXX";
-    char    https_output_path[] = "/tmp/gsgx-ias-output-XXXXXX";
-    char*   https_header = NULL;
-    char*   https_output = NULL;
-    ssize_t https_header_len = 0;
-    ssize_t https_output_len = 0;
-    int header_fd = -1;
-    int output_fd = -1;
-    int fds[2] = {-1, -1};
-
-    header_fd = mkstemp(https_header_path);
-    if (header_fd < 0)
-        goto failed;
-
-    output_fd = mkstemp(https_output_path);
-    if (output_fd < 0)
-        goto failed;
-
-    ret = INLINE_SYSCALL(socketpair, 4, AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, &fds[0]);
-    if (IS_ERR(ret))
-        goto failed;
-
-    // Write HTTPS request in XML format
-    size_t https_request_len = quote_str_len + nonce_str_len + HTTPS_REQUEST_MAX_LENGTH;
-    char*  https_request = __alloca(https_request_len);
-    https_request_len = snprintf(https_request, https_request_len,
-                                 "{\"isvEnclaveQuote\":\"%s\",\"nonce\":\"%s\"}",
-                                 quote_str, nonce_str);
-
-    ret = INLINE_SYSCALL(write, 3, fds[1], https_request, https_request_len);
-    if (IS_ERR(ret))
-        goto failed;
-    INLINE_SYSCALL(close, 1, fds[1]);
-    fds[1] = -1;
-
-    char subscription_header[64];
-    snprintf(subscription_header, 64, "Ocp-Apim-Subscription-Key: %s", subkey);
-
-    // Start a HTTPS client (using CURL)
-    const char* https_client_args[] = {
-            "/usr/bin/curl", "-s", "--tlsv1.2", "-X", "POST",
-            "-H", "Content-Type: application/json",
-            "-H", subscription_header,
-            "--data", "@-", "-o", https_output_path, "-D", https_header_path,
-            IAS_REPORT_URL, NULL,
-        };
-
-    int pid = ARCH_VFORK();
-    if (IS_ERR(pid))
-        goto failed;
-
-    if (!pid) {
-        INLINE_SYSCALL(dup2, 2, fds[0], 0);
-        extern char** environ;
-        INLINE_SYSCALL(execve, 3, https_client_args[0], https_client_args, environ);
-
-        /* shouldn't get to here */
-        SGX_DBG(DBG_E, "unexpected failure of new process\n");
-        __asm__ volatile ("hlt");
-        return 0;
-    }
-
-    // Make sure the HTTPS client has exited properly
-    int status;
-    ret = INLINE_SYSCALL(wait4, 4, pid, &status, 0, NULL);
-    if (IS_ERR(ret) || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
-        goto failed;
-
-    // Read the HTTPS output
-    ret = INLINE_SYSCALL(open, 2, https_output_path, O_RDONLY);
-    if (IS_ERR(ret))
-        goto failed;
-    INLINE_SYSCALL(close, 1, output_fd);
-    output_fd = ret;
-    https_output_len = INLINE_SYSCALL(lseek, 3, output_fd, 0, SEEK_END);
-    if (IS_ERR(https_output_len) || !https_output_len)
-        goto failed;
-    https_output = (char*)INLINE_SYSCALL(mmap, 6, NULL, ALLOC_ALIGN_UP(https_output_len),
-                                         PROT_READ, MAP_PRIVATE|MAP_FILE, output_fd, 0);
-    if (IS_ERR_P(https_output))
-        goto failed;
-
-    // Read the HTTPS headers
-    ret = INLINE_SYSCALL(open, 2, https_header_path, O_RDONLY);
-    if (IS_ERR(ret))
-        goto failed;
-    INLINE_SYSCALL(close, 1, header_fd);
-    header_fd = ret;
-    https_header_len = INLINE_SYSCALL(lseek, 3, header_fd, 0, SEEK_END);
-    if (IS_ERR(https_header_len) || !https_header_len)
-        goto failed;
-    https_header = (char*)INLINE_SYSCALL(mmap, 6, NULL, ALLOC_ALIGN_UP(https_header_len),
-                                         PROT_READ, MAP_PRIVATE|MAP_FILE, header_fd, 0);
-    if (IS_ERR_P(https_header))
-        goto failed;
-
-    // Parse the HTTPS headers
-    size_t   ias_sig_len     = 0;
-    uint8_t* ias_sig         = NULL;
-    size_t   ias_certs_len   = 0;
-    char*    ias_certs       = NULL;
-    char*    start       = https_header;
-    char*    end         = strchr(https_header, '\n');
-    while (end) {
-        char* next_start = end + 1;
-        // If the eol (\n) is preceded by a return (\r), move the end pointer.
-        if (end > start + 1 && *(end - 1) == '\r')
-            end--;
-
-        if (strstartswith_static(start, "X-IASReport-Signature: ")) {
-            start += static_strlen("X-IASReport-Signature: ");
-
-            // Decode IAS report signature
-            ret = lib_Base64Decode(start, end - start, NULL, &ias_sig_len);
-            if (ret < 0) {
-                SGX_DBG(DBG_E, "Malformed IAS signature\n");
-                goto failed;
-            }
-
-            ias_sig = (uint8_t*)INLINE_SYSCALL(mmap, 6, NULL, ALLOC_ALIGN_UP(ias_sig_len),
-                                               PROT_READ|PROT_WRITE,
-                                               MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
-            if (IS_ERR_P(ias_sig)) {
-                SGX_DBG(DBG_E, "Cannot allocate memory for IAS report signature\n");
-                goto failed;
-            }
-
-            ret = lib_Base64Decode(start, end - start, ias_sig, &ias_sig_len);
-            if (ret < 0) {
-                SGX_DBG(DBG_E, "Malformed IAS report signature\n");
-                goto failed;
-            }
-        } else if (strstartswith_static(start, "X-IASReport-Signing-Certificate: ")) {
-            start += static_strlen("X-IASReport-Signing-Certificate: ");
-
-            // Decode IAS signature chain
-            ias_certs_len = end - start;
-            ias_certs = (char*)INLINE_SYSCALL(mmap, 6, NULL, ALLOC_ALIGN_UP(ias_certs_len),
-                                              PROT_READ|PROT_WRITE,
-                                              MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
-            if (IS_ERR_P(ias_certs)) {
-                SGX_DBG(DBG_E, "Cannot allocate memory for IAS certificate chain\n");
-                goto failed;
-            }
-
-            /*
-             * The value of x-iasreport-signing-certificate is a certificate chain which
-             * consists of multiple certificates represented in the PEM format. The value
-             * is escaped using the % character. For example, a %20 in the certificate
-             * needs to be replaced as the newline ("\n"). The following logic iteratively
-             * reads the character and converts the escaped characters into the buffer.
-             */
-            size_t total_bytes = 0;
-            // Convert escaped characters
-            for (size_t i = 0; i < ias_certs_len; i++) {
-                if (start[i] == '%') {
-                    int8_t hex1 = hex2dec(start[i + 1]), hex2 = hex2dec(start[i + 2]);
-                    if (hex1 < 0 || hex2 < 0)
-                        goto failed;
-
-                    char c = hex1 * 16 + hex2;
-                    if (c != '\n') ias_certs[total_bytes++] = c;
-                    i += 2;
-                } else {
-                    ias_certs[total_bytes++] = start[i];
-                }
-            }
-
-            // Adjust certificate chain length
-            ias_certs[total_bytes++] = '\0';
-            if (ALLOC_ALIGN_UP(total_bytes) < ALLOC_ALIGN_UP(ias_certs_len))
-                INLINE_SYSCALL(munmap, 2, ALLOC_ALIGN_UP(total_bytes),
-                               ALLOC_ALIGN_UP(ias_certs_len) - ALLOC_ALIGN_UP(total_bytes));
-            ias_certs_len = total_bytes;
-        }
-
-        start = next_start;
-        end   = strchr(start, '\n');
-    }
-
-    if (!ias_sig) {
-        SGX_DBG(DBG_E, "IAS returned invalid headers: no report signature\n");
-        goto failed;
-    }
-
-    if (!ias_certs) {
-        SGX_DBG(DBG_E, "IAS returned invalid headers: no certificate chain\n");
-        goto failed;
-    }
-
-    // Now return the attestation data, including the IAS response, signature, and the
-    // certificate chain back to the caller.
-    attestation->ias_report     = https_output;
-    attestation->ias_report_len = https_output_len;
-    attestation->ias_sig        = ias_sig;
-    attestation->ias_sig_len    = ias_sig_len;
-    attestation->ias_certs      = ias_certs;
-    attestation->ias_certs_len  = ias_certs_len;
-    https_output = NULL; // Don't free the HTTPS output
-    ret = 0;
-done:
-    if (https_header)
-        INLINE_SYSCALL(munmap, 2, https_header, ALLOC_ALIGN_UP(https_header_len));
-    if (https_output)
-        INLINE_SYSCALL(munmap, 2, https_output, ALLOC_ALIGN_UP(https_output_len));
-    if (fds[0] != -1)
-        INLINE_SYSCALL(close, 1, fds[0]);
-    if (fds[1] != -1)
-        INLINE_SYSCALL(close, 1, fds[1]);
-    if (header_fd != -1) {
-        INLINE_SYSCALL(close,  1, header_fd);
-        INLINE_SYSCALL(unlink, 1, https_header_path);
-    }
-    if (output_fd != -1) {
-        INLINE_SYSCALL(close,  1, output_fd);
-        INLINE_SYSCALL(unlink, 1, https_output_path);
-    }
-    return ret;
-failed:
-    ret = -PAL_ERROR_DENIED;
-    goto done;
-}
-
-/*
- * This wrapper function performs the whole attestation procedure outside the enclave (except
- * retrieving the local remote attestation and verification). The function first contacts
- * the AESM service to retrieve a quote of the platform and the report of the quoting enclave.
- * Then, the function submits the quote to the IAS through a HTTPS client (CURL) to exchange
- * for a remote attestation report signed by a Intel-approved certificate chain. Finally, the
- * function returns the QE report, the quote, and the response from the IAS back to the enclave
- * for verification.
- *
- * @spid:        The client SPID registered with IAS.
- * @subkey:      SPID subscription key.
- * @linkable:    A boolean that represents whether the SPID is linkable.
- * @report:      The local report of the target enclave.
- * @nonce:       A 16-byte nonce randomly generated inside the enclave.
- * @attestation: A structure for storing the response from the AESM service and the IAS.
- */
-int retrieve_verified_quote(const sgx_spid_t* spid, const char* subkey, bool linkable,
-                            const sgx_report_t* report, const sgx_quote_nonce_t* nonce,
-                            sgx_attestation_t* attestation) {
+int retrieve_quote(const sgx_spid_t* spid, bool linkable, const sgx_report_t* report,
+                   const sgx_quote_nonce_t* nonce, char** quote, size_t* quote_len) {
+#ifdef SGX_DCAP
+    __UNUSED(spid);
+    __UNUSED(linkable);
+    __UNUSED(nonce);
+#endif
 
     int ret = connect_aesm_service();
     if (ret < 0)
         return ret;
 
     Request req = REQUEST__INIT;
+
+#ifdef SGX_DCAP
+    sgx_att_key_id_t default_att_key_id;
+    memset(&default_att_key_id, 0, sizeof(default_att_key_id));
+    memcpy(&default_att_key_id, &g_default_ecdsa_p256_att_key_id,
+           sizeof(g_default_ecdsa_p256_att_key_id));
+
+    Request__GetQuoteExRequest getreq = REQUEST__GET_QUOTE_EX_REQUEST__INIT;
+    getreq.report.data         = (uint8_t*)report;
+    getreq.report.len          = SGX_REPORT_ACTUAL_SIZE;
+    getreq.has_att_key_id      = true;
+    getreq.att_key_id.data     = (uint8_t*)&default_att_key_id;
+    getreq.att_key_id.len      = sizeof(default_att_key_id);
+    getreq.has_qe_report_info  = false; /* used to detect early that QE was spoofed; ignore now */
+    getreq.qe_report_info.data = NULL;
+    getreq.qe_report_info.len  = 0;
+    getreq.buf_size            = SGX_QUOTE_MAX_SIZE;
+    req.getquoteexreq          = &getreq;
+#else
     Request__GetQuoteRequest getreq = REQUEST__GET_QUOTE_REQUEST__INIT;
-    getreq.report.data   = (uint8_t*) report;
+    getreq.report.data   = (uint8_t*)report;
     getreq.report.len    = SGX_REPORT_ACTUAL_SIZE;
     getreq.quote_type    = linkable ? SGX_LINKABLE_SIGNATURE : SGX_UNLINKABLE_SIGNATURE;
-    getreq.spid.data     = (uint8_t*) spid;
+    getreq.spid.data     = (uint8_t*)spid;
     getreq.spid.len      = sizeof(*spid);
     getreq.has_nonce     = true;
-    getreq.nonce.data    = (uint8_t*) nonce;
+    getreq.nonce.data    = (uint8_t*)nonce;
     getreq.nonce.len     = sizeof(*nonce);
     getreq.buf_size      = SGX_QUOTE_MAX_SIZE;
     getreq.has_qe_report = true;
     getreq.qe_report     = true;
     req.getquotereq      = &getreq;
+#endif
 
     Response* res = NULL;
     ret = request_aesm_service(&req, &res);
     if (ret < 0)
         return ret;
 
+    ret = -EPERM;
+#ifdef SGX_DCAP
+    if (!res->getquoteexres) {
+#else
     if (!res->getquoteres) {
+#endif
         SGX_DBG(DBG_E, "aesm_service returned wrong message\n");
-        goto failed;
+        goto out;
     }
 
+#ifdef SGX_DCAP
+    Response__GetQuoteExResponse* r = res->getquoteexres;
+#else
     Response__GetQuoteResponse* r = res->getquoteres;
+#endif
     if (r->errorcode != 0) {
         SGX_DBG(DBG_E, "aesm_service returned error: %d\n", r->errorcode);
-        goto failed;
+        goto out;
     }
 
-    if (!r->has_quote     || r->quote.len < sizeof(sgx_quote_t) ||
-        !r->has_qe_report || r->qe_report.len != SGX_REPORT_ACTUAL_SIZE) {
-        SGX_DBG(DBG_E, "aesm_service returned invalid quote or report\n");
-        goto failed;
+    if (!r->has_quote || r->quote.len < sizeof(sgx_quote_t)) {
+        SGX_DBG(DBG_E, "aesm_service returned invalid quote\n");
+        goto out;
     }
 
-    sgx_quote_t* quote = (sgx_quote_t*) INLINE_SYSCALL(mmap, 6, NULL, ALLOC_ALIGN_UP(r->quote.len),
-                                                       PROT_READ|PROT_WRITE,
-                                                       MAP_ANONYMOUS|MAP_PRIVATE, -1, 0);
-    if (IS_ERR_P(quote)) {
+    /* Intel SGX SDK implementation of the Quoting Enclave always sets `quote.len` to user-provided
+     * `getreq.buf_size` (see above) instead of the actual size. We calculate the actual size here
+     * by peeking into the quote and determining the size of the signature. */
+    size_t actual_quote_size = sizeof(sgx_quote_t) + ((sgx_quote_t*)r->quote.data)->signature_len;
+    if (actual_quote_size > SGX_QUOTE_MAX_SIZE) {
+        SGX_DBG(DBG_E, "Size of the obtained SGX quote exceeds %d\n", SGX_QUOTE_MAX_SIZE);
+        goto out;
+    }
+
+    char* mmapped = (char*)INLINE_SYSCALL(mmap, 6, NULL, ALLOC_ALIGN_UP(actual_quote_size),
+                                          PROT_READ|PROT_WRITE,
+                                          MAP_ANONYMOUS|MAP_PRIVATE, -1, 0);
+    if (IS_ERR_P(mmapped)) {
         SGX_DBG(DBG_E, "Failed to allocate memory for the quote\n");
-        goto failed;
+        goto out;
     }
 
-    memcpy(quote, r->quote.data, r->quote.len);
-    attestation->quote = quote;
-    attestation->quote_len = r->quote.len;
+    memcpy(mmapped, r->quote.data, actual_quote_size);
 
-    ret = contact_intel_attest_service(subkey, nonce, (sgx_quote_t *) quote, attestation);
-    if (ret < 0) {
-        INLINE_SYSCALL(munmap, 2, quote, ALLOC_ALIGN_UP(r->quote.len));
-        goto failed;
-    }
+    *quote = mmapped;
+    *quote_len = actual_quote_size;
 
-    memcpy(&attestation->qe_report, r->qe_report.data, sizeof(sgx_report_t));
+    ret = 0;
+out:
     response__free_unpacked(res, NULL);
-    return 0;
-
-failed:
-    response__free_unpacked(res, NULL);
-    return -PAL_ERROR_DENIED;
+    return ret;
 }

@@ -79,20 +79,38 @@ exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
 # The name of the Pygments (syntax highlighting) style to use.
 pygments_style = None
 
+highlight_language = 'c'
+primary_domain = 'c'
+
 rst_prolog = '''
-.. |nbsp| unicode:: 0xa0
+.. |~| unicode:: 0xa0
    :trim:
 '''
 
-breathe_default_project = 'graphene'
-breathe_projects = {breathe_default_project: '_build/doxygen/xml'}
+breathe_projects = {p: '_build/doxygen-{}/xml'.format(p)
+    for p in ('libos', 'pal', 'pal-linux', 'pal-linux-sgx')}
 
 def generate_doxygen(app):
-    subprocess.check_call(['doxygen', 'Doxyfile'])
+    for p in breathe_projects:
+        subprocess.check_call(['doxygen', 'Doxyfile-{}'.format(p)])
+
 def setup(app):
+    app.add_stylesheet('css/graphene.css')
     app.connect('builder-inited', generate_doxygen)
 
+breathe_domain_by_extension = {
+    'h': 'c',
+}
+
 todo_include_todos = True
+
+nitpicky = True
+nitpick_ignore = [
+    ('c:type', 'bool'),
+    ('c:type', 'uint32_t'),
+    ('c:type', 'uint64_t'),
+    ('c:type', 'union'),
+]
 
 # -- Options for HTML output -------------------------------------------------
 
@@ -100,12 +118,10 @@ todo_include_todos = True
 # a list of builtin themes.
 #
 html_theme = 'sphinx_rtd_theme'
-
-# Theme options are theme-specific and customize the look and feel of a theme
-# further.  For a list of options available for each theme, see the
-# documentation.
-#
-# html_theme_options = {}
+html_theme_options = {
+    'logo_only': True,
+}
+html_logo = 'graphene_logo.svg'
 
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
@@ -129,6 +145,10 @@ html_static_path = ['_static']
 # (source start file, name, description, authors, manual section).
 man_pages = [
     ('manpages/pal_loader', 'pal_loader', 'FIXME Loader', [author], 1),
+    ('manpages/is_sgx_available', 'is_sgx_available', 'Check SGX compatibility', [author], 1),
+    ('manpages/quote_dump', 'quote_dump', 'Display SGX quote', [author], 1),
+    ('manpages/ias_request', 'ias_request', 'Submit Intel Attestation Service request', [author], 1),
+    ('manpages/verify_ias_report', 'verify_ias_report', 'Verify Intel Attestation Service report', [author], 1),
 ]
 
 # barf if a page is not included

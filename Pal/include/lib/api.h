@@ -1,18 +1,5 @@
-/* Copyright (C) 2014 Stony Brook University
-   This file is part of Graphene Library OS.
-
-   Graphene Library OS is free software: you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public License
-   as published by the Free Software Foundation, either version 3 of the
-   License, or (at your option) any later version.
-
-   Graphene Library OS is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
+/* Copyright (C) 2014 Stony Brook University */
 
 #ifndef API_H
 #define API_H
@@ -29,13 +16,6 @@ typedef ptrdiff_t ssize_t;
 #endif
 
 /* Macros */
-
-#ifndef likely
-# define likely(x)	__builtin_expect((!!(x)),1)
-#endif
-#ifndef unlikely
-# define unlikely(x)	__builtin_expect((!!(x)),0)
-#endif
 
 #ifndef MIN
 #define MIN(a,b) \
@@ -99,6 +79,8 @@ typedef ptrdiff_t ssize_t;
 #define ARRAY_SIZE(a) (FORCE_STATIC_ARRAY(a) + sizeof(a) / sizeof(a[0]))
 #endif
 
+#define DEBUG_BREAK() do { __asm__ volatile ("int $3"); } while (0)
+
 #ifndef container_of
 /**
  * container_of - cast a member of a structure out to the containing structure
@@ -115,8 +97,11 @@ typedef ptrdiff_t ssize_t;
 #define XSTRINGIFY(x) STRINGIFY(x)
 #define STRINGIFY(x) #x
 
+/* fail build if str is not a static string */
+#define FORCE_LITERAL_CSTR(str) ("" str "")
+
 #define __UNUSED(x) do { (void)(x); } while (0)
-#define static_strlen(str) (ARRAY_SIZE(str) - 1)
+#define static_strlen(str) (ARRAY_SIZE(FORCE_LITERAL_CSTR(str)) - 1)
 
 /* Libc functions */
 
@@ -129,7 +114,8 @@ long strtol (const char *s, char **endptr, int base);
 int atoi (const char *nptr);
 long int atol (const char *nptr);
 
-char * strchr (const char *s, int c_in);
+char* strchr(const char* s, int c_in);
+const char* strstr(const char* haystack, const char* needle);
 
 void * memcpy (void *dstpp, const void *srcpp, size_t len);
 void * memmove (void *dstpp, const void *srcpp, size_t len);
@@ -143,25 +129,20 @@ void *malloc(size_t size);
 void free(void *ptr);
 void *calloc(size_t nmemb, size_t size);
 
-/* force failure if str is not a static string */
-#define force_literal_cstr(str)   ("" str "")
-
 /* check if the var is exactly the same as the static string */
-#define strcmp_static(var, str)                                               \
-    (memcmp(var,                                                              \
-            force_literal_cstr(str),                                          \
-            MIN(strlen(var) + 1, static_strlen(force_literal_cstr(str))) + 1))
+#define strcmp_static(var, str) \
+    (memcmp(var, str, MIN(strlen(var), static_strlen(str)) + 1))
 
 /* check if the var starts with the static string */
 #define strstartswith_static(var, str) \
-    (!memcmp(var, force_literal_cstr(str), static_strlen(force_literal_cstr(str))))
+    (!memcmp(var, str, static_strlen(str)))
 
-/* copy static string and return the address of the null end (null if the dest
+/* copy static string and return the address of the NUL byte (NULL if the dest
  * is not large enough).*/
-#define strcpy_static(var, str, max)                                                      \
-    (static_strlen(force_literal_cstr(str)) + 1 > (max) ? NULL :                          \
-     memcpy((var), force_literal_cstr(str), static_strlen(force_literal_cstr(str)) + 1) + \
-     static_strlen(force_literal_cstr(str)))
+#define strcpy_static(var, str, max)                                  \
+    (static_strlen(str) + 1 > (max)                                   \
+     ? NULL                                                           \
+     : memcpy(var, str, static_strlen(str) + 1) + static_strlen(str))
 
 /* Copy a fixed size array. */
 #define COPY_ARRAY(dst, src)                                                    \
@@ -179,6 +160,25 @@ void *calloc(size_t nmemb, size_t size);
         memcpy(*_d, *_s, sizeof(*_d));                                          \
     } while (0)
 
+#ifdef __x86_64__
+#define COMPILER_BARRIER() ({ __asm__ __volatile__ ("" ::: "memory"); })
+#endif // __x86_64__
+
+/* Idea taken from: https://elixir.bootlin.com/linux/v5.6/source/include/linux/compiler.h */
+#define READ_ONCE(x) ({                     \
+    __typeof__(x) _y;                       \
+    COMPILER_BARRIER();                     \
+    __builtin_memcpy(&_y, &(x), sizeof(x)); \
+    COMPILER_BARRIER();                     \
+    _y; })
+
+#define WRITE_ONCE(x, y) ({                 \
+    __typeof__(x) _y = (__typeof__(x))(y);  \
+    COMPILER_BARRIER();                     \
+    __builtin_memcpy(&(x), &_y, sizeof(x)); \
+    COMPILER_BARRIER();                     \
+    _y; })
+
 /* Libc printf functions. stdio.h/stdarg.h. */
 void fprintfmt (int (*_fputch)(void *, int, void *), void * f, void * putdat,
                 const char * fmt, ...) __attribute__((format(printf, 4, 5)));
@@ -186,7 +186,8 @@ void fprintfmt (int (*_fputch)(void *, int, void *), void * f, void * putdat,
 void vfprintfmt (int (*_fputch)(void *, int, void *), void * f, void * putdat,
                  const char * fmt, va_list ap) __attribute__((format(printf, 4, 0)));
 
-int snprintf (char * buf, size_t n, const char * fmt, ...) __attribute__((format(printf, 3, 4)));
+int vsnprintf(char* buf, size_t n, const char* fmt, va_list ap);
+int snprintf(char* buf, size_t n, const char* fmt, ...) __attribute__((format(printf, 3, 4)));
 
 /* Miscelleneous */
 
@@ -260,5 +261,25 @@ int set_config (struct config_store * cfg, const char * key, const char * val);
 #define URI_PREFIX_FILE         URI_TYPE_FILE       URI_PREFIX_SEPARATOR
 
 #define URI_PREFIX_FILE_LEN     (static_strlen(URI_PREFIX_FILE))
+
+#ifdef __x86_64__
+static inline bool __range_not_ok(uintptr_t addr, size_t size) {
+    addr += size;
+    if (addr < size) {
+        /* pointer arithmetic overflow, this check is x86-64 specific */
+        return true;
+    }
+    return false;
+}
+
+/* Check if pointer to memory region is valid. Return true if the memory
+ * region may be valid, false if it is definitely invalid. */
+static inline bool access_ok(const volatile void* addr, size_t size) {
+    return !__range_not_ok((uintptr_t)addr, size);
+}
+
+#else
+# error "Unsupported architecture"
+#endif /* __x86_64__ */
 
 #endif /* API_H */

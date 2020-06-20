@@ -1,18 +1,5 @@
-/* Copyright (C) 2014 Stony Brook University
-   This file is part of Graphene Library OS.
-
-   Graphene Library OS is free software: you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public License
-   as published by the Free Software Foundation, either version 3 of the
-   License, or (at your option) any later version.
-
-   Graphene Library OS is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
+/* Copyright (C) 2014 Stony Brook University */
 
 #ifndef PAL_SECURITY_H
 #define PAL_SECURITY_H
@@ -28,7 +15,7 @@ struct pal_sec {
     PAL_IDX         ppid, pid, uid, gid;
 
     /* enclave information */
-    sgx_target_info_t  aesm_targetinfo;
+    sgx_target_info_t  qe_targetinfo;
     sgx_measurement_t  mr_enclave;
     sgx_measurement_t  mr_signer;
     sgx_attributes_t   enclave_attributes;
@@ -43,9 +30,8 @@ struct pal_sec {
 
     PAL_SEC_STR     manifest_name;
 
-    /* child's stream and cargo FDs created and sent over by parent */
+    /* child's stream FD created and sent over by parent */
     PAL_IDX         stream_fd;
-    PAL_IDX         cargo_fd;
 
     /* additional information */
     PAL_SEC_STR     pipe_prefix;
@@ -68,7 +54,5 @@ extern struct pal_sec pal_sec;
 
 #define GRAPHENE_TEMPDIR        "/tmp/graphene"
 #define GRAPHENE_PIPEDIR        (GRAPHENE_TEMPDIR "/pipes")
-
-#define PROC_INIT_FD    255
 
 #endif /* PAL_SECURITY_H */

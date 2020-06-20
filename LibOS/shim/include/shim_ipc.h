@@ -1,18 +1,5 @@
-/* Copyright (C) 2014 Stony Brook University
-   This file is part of Graphene Library OS.
-
-   Graphene Library OS is free software: you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public License
-   as published by the Free Software Foundation, either version 3 of the
-   License, or (at your option) any later version.
-
-   Graphene Library OS is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
+/* Copyright (C) 2014 Stony Brook University */
 
 /*
  * shim_ipc.h
@@ -61,9 +48,6 @@ struct shim_ipc_msg {
     size_t size;
     IDTYPE src, dst;
     unsigned long seq;
-#ifdef PROFILE
-    unsigned long time;
-#endif
     char msg[];
 } __attribute__((packed));
 
@@ -110,7 +94,6 @@ typedef int (*ipc_callback)(struct shim_ipc_msg* msg, struct shim_ipc_port* port
 /* Basic message codes */
 enum {
     IPC_RESP = 0,
-    IPC_CHECKPOINT,
     IPC_BASE_BOUND,
 };
 
@@ -119,22 +102,10 @@ struct shim_ipc_resp {
     int retval;
 } __attribute__((packed));
 
-/* PID_CHECKPOINT: broadcast checkpointing */
-struct shim_ipc_checkpoint {
-    IDTYPE cpsession;
-    char cpdir[];
-};
-
-int ipc_checkpoint_send(const char* cpdir, IDTYPE cpsession);
-int ipc_checkpoint_callback(struct shim_ipc_msg* msg, struct shim_ipc_port* port);
-
 /* Message code from child to parent */
 #define IPC_CLD_BASE IPC_BASE_BOUND
 enum {
     IPC_CLD_EXIT = IPC_CLD_BASE,
-#ifdef PROFILE
-    IPC_CLD_PROFILE,
-#endif
     IPC_CLD_BOUND,
 };
 
@@ -143,26 +114,10 @@ struct shim_ipc_cld_exit {
     IDTYPE ppid, tid;
     unsigned int exitcode;
     unsigned int term_signal;
-#ifdef PROFILE
-    unsigned long time;
-#endif
 } __attribute__((packed));
 
 int ipc_cld_exit_send(IDTYPE ppid, IDTYPE tid, unsigned int exitcode, unsigned int term_signal);
 int ipc_cld_exit_callback(struct shim_ipc_msg* msg, struct shim_ipc_port* port);
-
-#ifdef PROFILE
-#include <shim_profile.h>
-
-struct shim_ipc_cld_profile {
-    unsigned long time;
-    int nprofile;
-    struct profile_val profile[];
-} __attribute__((packed));
-
-int ipc_cld_profile_send(void);
-int ipc_cld_profile_callback(struct shim_ipc_msg* msg, struct shim_ipc_port* port);
-#endif
 
 /* Message code to namespace manager */
 #define IPC_PID_BASE IPC_CLD_BOUND

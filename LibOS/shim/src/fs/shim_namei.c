@@ -1,19 +1,5 @@
-/* Copyright (C) 2017, University of North Carolina at Chapel Hill
-   and Fortanix, Inc.
-   This file is part of Graphene Library OS.
-
-   Graphene Library OS is free software: you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public License
-   as published by the Free Software Foundation, either version 3 of the
-   License, or (at your option) any later version.
-
-   Graphene Library OS is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
+/* Copyright (C) 2017, University of North Carolina at Chapel Hill and Fortanix, Inc. */
 
 /*
  * shim_namei.c
@@ -22,21 +8,17 @@
  * directory cache.
  */
 
+#include <asm/fcntl.h>
+#include <linux/fcntl.h>
+#include <linux/stat.h>
 #include <stdbool.h>
 
-#include <shim_internal.h>
-#include <shim_utils.h>
-#include <shim_thread.h>
-#include <shim_handle.h>
-#include <shim_fs.h>
-#include <shim_profile.h>
-
 #include <pal.h>
-
-#include <linux/stat.h>
-#include <linux/fcntl.h>
-
-#include <asm/fcntl.h>
+#include <shim_fs.h>
+#include <shim_handle.h>
+#include <shim_internal.h>
+#include <shim_thread.h>
+#include <shim_utils.h>
 
 /* Advances a char pointer (string) past any repeated slashes and returns the result.
  * Must be a null-terminated string. */
@@ -96,12 +78,11 @@ int __permission(struct shim_dentry* dent, mode_t mask) {
      * just NO_MODE.
      */
     if (dent->mode == NO_MODE) {
-
-        /* DEP 6/16/17: I don't think we should be defaulting to 0 if
-         * there isn't a mode function. */
         assert(dent->fs);
-        assert(dent->fs->d_ops);
-        assert(dent->fs->d_ops->mode);
+        if (!dent->fs->d_ops || !dent->fs->d_ops->mode) {
+            /* dentry is emulated in LibOS (AF_UNIX socket or FIFO pipe): no permission check */
+            return 0;
+        }
 
         /* Fall back to the low-level file system */
         int err = dent->fs->d_ops->mode(dent, &mode);
@@ -319,7 +300,11 @@ int __path_lookupat (struct shim_dentry * start, const char * path, int flags,
     }
 
     assert(fs);
-    assert(start->state & DENTRY_ISDIRECTORY);
+
+    if (!(start->state & DENTRY_ISDIRECTORY)) {
+        err = -ENOTDIR;
+        goto out;
+    }
 
     // Peel off any preceeding slashes
     path = eat_slashes(path);
@@ -394,7 +379,12 @@ int __path_lookupat (struct shim_dentry * start, const char * path, int flags,
                         struct shim_dentry * root;
                         // not sure how to deal with this case if cur_thread isn't defined
                         assert(cur_thread);
+
+                        /* FIXME: below logic assumes that target file is under chroot; this misses
+                         *        cases like `/dev/stdin` which is a link to `/proc/self/fd/0`
+                         *        (i.e., Graphene currently fails if target is under pseudo-FS) */
                         root = cur_thread->root;
+
                         /*XXX: Check out path_reacquire here? */
                         // my_dent's refcount was incremented by lookup_dentry above,
                         // we need to not leak it here

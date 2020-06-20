@@ -1,12 +1,28 @@
-c_executables = $(patsubst %.c,%,$(wildcard *.c))
-cxx_executables = $(patsubst %.cpp,%,$(wildcard *.cpp))
+c_executables = \
+	fork \
+	helloworld \
+	vfork
 
-exec_target = $(c_executables) $(cxx_executables)
-target = $(c_executables) $(cxx_executables) manifest
+cxx_executables =
+
+exec_target = \
+	$(c_executables) \
+	$(cxx_executables)
+
+target = \
+	$(c_executables) \
+	$(cxx_executables) \
+	manifest
 
 include ../../../../Scripts/Makefile.configs
 include ../../../../Scripts/Makefile.manifest
 include ../../../../Scripts/Makefile.Test
+
+CFLAGS += \
+	-I ../../include/arch/$(ARCH) \
+	-I $(PALDIR)/../include \
+	-I $(PALDIR)/../include/arch/$(ARCH) \
+	-I $(PALDIR)/../include/arch/$(ARCH)/$(PAL_HOST)
 
 .PHONY: crt_init-recurse
 crt_init-recurse:

@@ -9,14 +9,18 @@ import random
 import shutil
 import string
 import subprocess
+import sys
 import unittest
-from datetime import datetime, timedelta
 
 from regression import (
     HAS_SGX,
     RegressionTestCase,
     expectedFailureIf,
 )
+
+if HAS_SGX:
+    sys.path.insert(0, os.path.dirname(__file__) + '/../src/host/Linux-SGX/signer')
+    from pal_sgx_sign import read_manifest
 
 CPUINFO_FLAGS_WHITELIST = [
     'fpu', 'vme', 'de', 'pse', 'tsc', 'msr', 'pae', 'mce', 'cx8', 'apic', 'sep',
@@ -37,6 +41,105 @@ class TC_00_Basic(RegressionTestCase):
         _, stderr = self.run_binary(['normalize_path'])
 
         self.assertIn("Success!\n", stderr)
+
+    def test_002_avl_tree(self):
+        _, _ = self.run_binary(['avl_tree_test'])
+
+
+@unittest.skipIf(HAS_SGX, "Not yet tested on SGX")
+class TC_00_BasicSet2(RegressionTestCase):
+    def test_Event2(self):
+        _, stderr = self.run_binary(['Event2'])
+        self.assertIn('Enter main thread', stderr)
+        self.assertIn('In thread 1', stderr)
+        self.assertIn('Success, leave main thread', stderr)
+
+    def test_Exception2(self):
+        _, stderr = self.run_binary(['Exception2'])
+        self.assertIn('Enter Main Thread', stderr)
+        self.assertIn('failure in the handler: 0x', stderr)
+        self.assertNotIn('Leave Main Thread', stderr)
+
+    def test_Failure(self):
+        _, stderr = self.run_binary(['Failure'])
+        self.assertIn('Enter Main Thread', stderr)
+        self.assertIn('Failure notified: Function not supported', stderr)
+        self.assertIn('Leave Main Thread', stderr)
+
+    def test_File2(self):
+        _, stderr = self.run_binary(['File2'])
+        self.assertIn('Enter Main Thread', stderr)
+        self.assertIn('Hello World', stderr)
+        self.assertIn('Leave Main Thread', stderr)
+
+    def test_HelloWorld(self):
+        stdout, _ = self.run_binary(['HelloWorld'])
+        self.assertIn('Hello World', stdout)
+
+    def test_Pie(self):
+        stdout, stderr = self.run_binary(['Pie'])
+        self.assertIn('start program: file:Pie', stderr)
+        self.assertIn('Hello World', stdout)
+
+    def test_Process4(self):
+        _, stderr = self.run_binary(['Process4'], timeout=5)
+        self.assertIn('In process: Process4', stderr)
+        self.assertIn('wall time = ', stderr)
+        for i in range(100):
+            self.assertIn('In process: Process4 %d ' % i, stderr)
+
+    def test_Segment(self):
+        _, stderr = self.run_binary(['Segment'])
+        self.assertIn('TLS = 0x', stderr)
+
+    def test_Select(self):
+        _, stderr = self.run_binary(['Select'])
+        self.assertIn('Enter main thread', stderr)
+        self.assertIn('Waiting on event', stderr)
+        self.assertIn('Enter thread', stderr)
+        self.assertIn('Thread sets event', stderr)
+        self.assertIn('Event was called', stderr)
+        self.assertIn('Leave main thread', stderr)
+        self.assertIn('Leave thread', stderr)
+
+    def test_Sleep(self):
+        _, stderr = self.run_binary(['Sleep'], timeout=3)
+        self.assertIn('Enter Main Thread', stderr)
+        self.assertIn('Sleeping 3000000 microsecond...', stderr)
+        self.assertIn('Leave Main Thread', stderr)
+
+    def test_Tcp(self):
+        _, stderr = self.run_binary(['Tcp'])
+        self.assertIn('start time = ', stderr)
+        self.assertIn('server bound on tcp.srv:127.0.0.1:8000', stderr)
+        self.assertIn('client accepted on tcp:127.0.0.1:8000:127.0.0.1:', stderr)
+        self.assertIn('client connected on tcp:127.0.0.1:', stderr)
+        self.assertIn('read from server: Hello World', stderr)
+
+    def test_Udp(self):
+        _, stderr = self.run_binary(['Udp'])
+        self.assertIn('server bound on udp.srv:127.0.0.1:8000', stderr)
+        self.assertIn('client connected on udp:127.0.0.1:8000', stderr)
+        self.assertIn('read on server (from udp:127.0.0.1:', stderr)
+        self.assertIn('Hello World', stderr)
+        self.assertIn('wall time = ', stderr)
+
+    def test_Wait(self):
+        _, stderr = self.run_binary(['Wait'])
+        self.assertIn('Enter Main Thread', stderr)
+        self.assertIn('DkStreamsWaitEvents did not return any events', stderr)
+        self.assertIn('Enter thread 2', stderr)
+        self.assertIn('Enter thread 1', stderr)
+        self.assertIn('Leave thread 2', stderr)
+        self.assertIn('Leave thread 1', stderr)
+
+    def test_Yield(self):
+        _, stderr = self.run_binary(['Yield'])
+        self.assertIn('Enter Parent Thread', stderr)
+        self.assertIn('Enter Child Thread', stderr)
+        self.assertIn('child yielded', stderr)
+        self.assertIn('parent yielded', stderr)
+
 
 class TC_01_Bootstrap(RegressionTestCase):
     def test_100_basic_boostrapping(self):
@@ -107,17 +210,10 @@ class TC_01_Bootstrap(RegressionTestCase):
         self.assertIn('Loaded Manifest: file:' + manifest, stderr)
         self.assertIn('Loaded Executable: file:Bootstrap', stderr)
 
-    def test_106_manifest_with_shebang(self):
-        manifest = self.get_manifest('Bootstrap4')
-        _, stderr = self.run_binary(['./' + manifest])
-        self.assertIn('Loaded Manifest: file:' + manifest, stderr)
-        self.assertIn('Loaded Executable: file:Bootstrap', stderr)
-        self.assertIn('argv[0] = Bootstrap', stderr)
-
     @unittest.skipUnless(HAS_SGX, 'need SGX')
-    def test_107_manifest_with_nonelf_binary(self):
+    def test_106_manifest_with_nonelf_binary(self):
         manifest = self.get_manifest('nonelf_binary')
-        #Expect return code is -ENOEXEC(248 as unsigned char)
+        # Expected return code is -ENOEXEC (248 as unsigned char)
         with self.expect_returncode(248):
             self.run_binary([manifest])
 
@@ -211,8 +307,24 @@ class TC_02_Symbols(RegressionTestCase):
             self.assertNotEqual(value, 0, 'symbol {} has value 0'.format(k))
 
 class TC_10_Exception(RegressionTestCase):
+    def is_altstack_different_from_main_stack(self, output):
+        mainstack = 0
+        altstack  = 0
+        for line in output.splitlines():
+            if line.startswith('Stack in main:'):
+                mainstack = int(line.split(':')[1], 0)
+            elif line.startswith('Stack in handler:'):
+                altstack = int(line.split(':')[1], 0)
+
+        # handler stack cannot be "close" to the main stack
+        if abs(mainstack - altstack) < 8192:
+            return False
+        return True
+
     def test_000_exception(self):
         _, stderr = self.run_binary(['Exception'])
+
+        self.assertTrue(self.is_altstack_different_from_main_stack(stderr))
 
         # Exception Handling (Div-by-Zero)
         self.assertIn('Arithmetic Exception Handler', stderr)
@@ -486,6 +598,21 @@ class TC_20_SingleProcess(RegressionTestCase):
         # Thread Cleanup: Can still start threads.
         self.assertIn('Thread 4 ok.', stderr)
 
+    @unittest.skipUnless(HAS_SGX, 'This test is only meaningful on SGX PAL')
+    def test_511_thread2_exitless(self):
+        manifest = self.get_manifest('Thread2_exitless')
+        _, stderr = self.run_binary([manifest], timeout=60)
+
+        # Thread Cleanup: Exit by return.
+        self.assertIn('Thread 2 ok.', stderr)
+
+        # Thread Cleanup: Exit by DkThreadExit.
+        self.assertIn('Thread 3 ok.', stderr)
+        self.assertNotIn('Exiting thread 3 failed.', stderr)
+
+        # Thread Cleanup: Can still start threads.
+        self.assertIn('Thread 4 ok.', stderr)
+
     def test_900_misc(self):
         _, stderr = self.run_binary(['Misc'])
         # Query System Time
@@ -508,7 +635,7 @@ class TC_20_SingleProcess(RegressionTestCase):
 
 class TC_21_ProcessCreation(RegressionTestCase):
     def test_100_process(self):
-        _, stderr = self.run_binary(['Process'], timeout=8)
+        _, stderr = self.run_binary(['Process'], timeout=60)
         counter = collections.Counter(stderr.split('\n'))
         # Process Creation
         self.assertEqual(counter['Child Process Created'], 3)
@@ -563,21 +690,10 @@ class TC_40_AVXDisable(RegressionTestCase):
         _, stderr = self.run_binary(['AvxDisable'])
         self.assertIn('Illegal instruction executed in enclave', stderr)
 
-@unittest.skipUnless(HAS_SGX, 'need SGX')
+
+@unittest.skipUnless(HAS_SGX, 'This test is only meaningful on SGX PAL')
 class TC_50_Attestation(RegressionTestCase):
-    def test_000_remote_attestation(self):
-        _, stderr = self.run_binary(["Attestation"])
-
-        for line in stderr.split("\n"):
-            # Check the attestation status
-            if line.startswith("Attestation status:"):
-                status = line[19:].strip()
-                self.assertIn(status, ["OK", "GROUP_OUT_OF_DATE", "CONFIGURATION_NEEDED"])
-
-            # Check the timestamp
-            if line.startswith("Attestation timestamp:"):
-                timestamp = datetime.strptime(line[22:].strip(), "%Y-%m-%dT%H:%M:%S.%f")
-                # The timestamp may be in another time zone, but should be
-                # within 24 hours of the current time.
-                self.assertTrue(datetime.now() - timedelta(hours=24) <= timestamp and \
-                                datetime.now() + timedelta(hours=24) >= timestamp)
+    def test_000_attestation_report(self):
+        _, stderr = self.run_binary(['AttestationReport'])
+        self.assertNotIn('ERROR', stderr)
+        self.assertIn('Success', stderr)

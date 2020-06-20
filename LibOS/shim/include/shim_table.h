@@ -4,8 +4,13 @@
 #include <shim_types.h>
 #include <shim_unistd.h>
 #include <stdnoreturn.h>
+#if defined(__i386__) || defined (__x86_64__)
+#include <asm/ldt.h>
+#endif
 
 #ifdef IN_SHIM
+
+void debug_unsupp(int num);
 
 typedef void (*shim_fp)(void);
 
@@ -320,7 +325,6 @@ long __shim_msgpersist(long, long);
 long __shim_benchmark_rpc(long, long, long, long);
 long __shim_send_rpc(long, long, long);
 long __shim_recv_rpc(long, long, long);
-long __shim_checkpoint(long);
 
 /* syscall implementation */
 size_t shim_do_read(int fd, void* buf, size_t count);
@@ -330,6 +334,8 @@ int shim_do_close(int fd);
 int shim_do_stat(const char* file, struct stat* statbuf);
 int shim_do_fstat(int fd, struct stat* statbuf);
 int shim_do_lstat(const char* file, struct stat* stat);
+int shim_do_statfs(const char* path, struct statfs* buf);
+int shim_do_fstatfs(int fd, struct statfs* buf);
 int shim_do_poll(struct pollfd* fds, nfds_t nfds, int timeout);
 off_t shim_do_lseek(int fd, off_t offset, int origin);
 void* shim_do_mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset);
@@ -353,8 +359,8 @@ int shim_do_sched_yield(void);
 void* shim_do_mremap(void* addr, size_t old_len, size_t new_len, int flags, void* new_addr);
 int shim_do_msync(void* start, size_t len, int flags);
 int shim_do_mincore(void* start, size_t len, unsigned char* vec);
-int shim_do_dup(int fd);
-int shim_do_dup2(int oldfd, int newfd);
+int shim_do_dup(unsigned int fd);
+int shim_do_dup2(unsigned int oldfd, unsigned int newfd);
 int shim_do_pause(void);
 int shim_do_nanosleep(const struct __kernel_timespec* rqtp, struct __kernel_timespec* rmtp);
 int shim_do_getitimer(int which, struct __kernel_itimerval* value);
@@ -365,12 +371,12 @@ pid_t shim_do_getpid(void);
 ssize_t shim_do_sendfile(int out_fd, int in_fd, off_t* offset, size_t count);
 int shim_do_socket(int family, int type, int protocol);
 int shim_do_connect(int sockfd, struct sockaddr* addr, int addrlen);
-int shim_do_accept(int fd, struct sockaddr* addr, socklen_t* addrlen);
+int shim_do_accept(int fd, struct sockaddr* addr, int* addrlen);
 ssize_t shim_do_sendto(int fd, const void* buf, size_t len, int flags,
-                       const struct sockaddr* dest_addr, socklen_t addrlen);
+                       const struct sockaddr* dest_addr, int addrlen);
 ssize_t shim_do_recvfrom(int fd, void* buf, size_t len, int flags, struct sockaddr* addr,
-                         socklen_t* addrlen);
-int shim_do_bind(int sockfd, struct sockaddr* addr, socklen_t addrlen);
+                         int* addrlen);
+int shim_do_bind(int sockfd, struct sockaddr* addr, int addrlen);
 int shim_do_listen(int sockfd, int backlog);
 ssize_t shim_do_sendmsg(int fd, struct msghdr* msg, int flags);
 ssize_t shim_do_recvmsg(int fd, struct msghdr* msg, int flags);
@@ -418,6 +424,7 @@ int shim_do_fchown(int fd, uid_t user, gid_t group);
 mode_t shim_do_umask(mode_t mask);
 int shim_do_gettimeofday(struct __kernel_timeval* tv, struct __kernel_timezone* tz);
 int shim_do_getrlimit(int resource, struct __kernel_rlimit* rlim);
+int shim_do_getrusage(int who, struct __kernel_rusage* ru);
 uid_t shim_do_getuid(void);
 gid_t shim_do_getgid(void);
 int shim_do_setuid(uid_t uid);
@@ -463,6 +470,8 @@ int shim_do_epoll_wait(int epfd, struct __kernel_epoll_event* events, int maxeve
 int shim_do_epoll_ctl(int epfd, int op, int fd, struct __kernel_epoll_event* event);
 int shim_do_clock_gettime(clockid_t which_clock, struct timespec* tp);
 int shim_do_clock_getres(clockid_t which_clock, struct timespec* tp);
+int shim_do_clock_nanosleep(clockid_t clock_id, int flags, const struct __kernel_timespec* rqtp,
+                            struct __kernel_timespec* rmtp);
 noreturn int shim_do_exit_group(int error_code);
 int shim_do_tgkill(int tgid, int pid, int sig);
 int shim_do_mbind(void* start, unsigned long len, int mode, unsigned long* nmask,
@@ -483,24 +492,26 @@ int shim_do_set_robust_list(struct robust_list_head* head, size_t len);
 int shim_do_get_robust_list(pid_t pid, struct robust_list_head** head, size_t* len);
 int shim_do_epoll_pwait(int epfd, struct __kernel_epoll_event* events, int maxevents,
                         int timeout_ms, const __sigset_t* sigmask, size_t sigsetsize);
-int shim_do_accept4(int sockfd, struct sockaddr* addr, socklen_t* addrlen, int flags);
-int shim_do_dup3(int oldfd, int newfd, int flags);
+int shim_do_accept4(int sockfd, struct sockaddr* addr, int* addrlen, int flags);
+int shim_do_dup3(unsigned int oldfd, unsigned int newfd, int flags);
 int shim_do_epoll_create1(int flags);
 int shim_do_pipe2(int* fildes, int flags);
-ssize_t shim_do_recvmmsg(int sockfd, struct mmsghdr* msg, size_t vlen, int flags,
+int shim_do_mknod(const char *pathname, mode_t mode, dev_t dev);
+int shim_do_mknodat(int dirfd, const char *pathname, mode_t mode, dev_t dev);
+ssize_t shim_do_recvmmsg(int sockfd, struct mmsghdr* msg, unsigned int vlen, int flags,
                          struct __kernel_timespec* timeout);
 int shim_do_prlimit64(pid_t pid, int resource, const struct __kernel_rlimit64* new_rlim,
                       struct __kernel_rlimit64* old_rlim);
-ssize_t shim_do_sendmmsg(int sockfd, struct mmsghdr* msg, size_t vlen, int flags);
+ssize_t shim_do_sendmmsg(int sockfd, struct mmsghdr* msg, unsigned int vlen, int flags);
 int shim_do_eventfd2(unsigned int count, int flags);
 int shim_do_eventfd(unsigned int count);
+int shim_do_getcpu(unsigned* cpu, unsigned* node, struct getcpu_cache* unused);
 
 /* libos call implementation */
 int shim_do_msgpersist(int msqid, int cmd);
 int shim_do_benchmark_rpc(pid_t pid, int times, const void* buf, size_t size);
 size_t shim_do_send_rpc(pid_t pid, const void* buf, size_t size);
 size_t shim_do_recv_rpc(pid_t* pid, void* buf, size_t size);
-int shim_do_checkpoint(const char* filename);
 
 #endif /* ! IN_SHIM */
 
@@ -539,8 +550,8 @@ int shim_madvise(void* start, size_t len, int behavior);
 int shim_shmget(key_t key, size_t size, int shmflg);
 void* shim_shmat(int shmid, const void* shmaddr, int shmflg);
 int shim_shmctl(int shmid, int cmd, struct shmid_ds* buf);
-int shim_dup(int fd);
-int shim_dup2(int oldfd, int newfd);
+int shim_dup(unsigned int fd);
+int shim_dup2(unsigned int oldfd, unsigned int newfd);
 int shim_pause(void);
 int shim_nanosleep(const struct __kernel_timespec* rqtp, struct __kernel_timespec* rmtp);
 int shim_getitimer(int which, struct __kernel_itimerval* value);
@@ -550,12 +561,12 @@ pid_t shim_getpid(void);
 ssize_t shim_sendfile(int out_fd, int in_fd, off_t* offset, size_t count);
 int shim_socket(int family, int type, int protocol);
 int shim_connect(int sockfd, struct sockaddr* addr, int addrlen);
-int shim_accept(int fd, struct sockaddr* addr, socklen_t* addrlen);
+int shim_accept(int fd, struct sockaddr* addr, int* addrlen);
 ssize_t shim_sendto(int fd, const void* buf, size_t len, int flags,
-                    const struct sockaddr* dest_addr, socklen_t addrlen);
+                    const struct sockaddr* dest_addr, int addrlen);
 ssize_t shim_recvfrom(int fd, void* buf, size_t len, int flags, struct sockaddr* addr,
-                      socklen_t* addrlen);
-int shim_bind(int sockfd, struct sockaddr* addr, socklen_t addrlen);
+                      int* addrlen);
+int shim_bind(int sockfd, struct sockaddr* addr, int addrlen);
 int shim_listen(int sockfd, int backlog);
 ssize_t shim_sendmsg(int fd, struct msghdr* msg, int flags);
 ssize_t shim_recvmsg(int fd, struct msghdr* msg, int flags);
@@ -709,14 +720,18 @@ time_t shim_time(time_t* tloc);
 int shim_futex(int* uaddr, int op, int val, void* utime, int* uaddr2, int val3);
 int shim_sched_setaffinity(pid_t pid, size_t len, __kernel_cpu_set_t* user_mask_ptr);
 int shim_sched_getaffinity(pid_t pid, size_t len, __kernel_cpu_set_t* user_mask_ptr);
+#if defined(__i386__) || defined(__x86_64__)
 int shim_set_thread_area(struct user_desc* u_info);
+#endif
 int shim_io_setup(unsigned nr_reqs, aio_context_t* ctx);
 int shim_io_destroy(aio_context_t ctx);
 int shim_io_getevents(aio_context_t ctx_id, long min_nr, long nr, struct io_event* events,
                       struct timespec* timeout);
 int shim_io_submit(aio_context_t ctx_id, long nr, struct iocb** iocbpp);
 int shim_io_cancel(aio_context_t ctx_id, struct iocb* iocb, struct io_event* result);
+#if defined(__i386__) || defined(__x86_64__)
 int shim_get_thread_area(struct user_desc* u_info);
+#endif
 int shim_lookup_dcookie(unsigned long cookie64, char* buf, size_t len);
 int shim_epoll_create(int size);
 int shim_remap_file_pages(void* start, size_t size, int prot, ssize_t pgoff, int flags);
@@ -735,8 +750,8 @@ int shim_timer_delete(timer_t timer_id);
 int shim_clock_settime(clockid_t which_clock, const struct timespec* tp);
 int shim_clock_gettime(clockid_t which_clock, struct timespec* tp);
 int shim_clock_getres(clockid_t which_clock, struct timespec* tp);
-int shim_clock_nanosleep(clockid_t which_clock, int flags, const struct timespec* rqtp,
-                         struct timespec* rmtp);
+int shim_clock_nanosleep(clockid_t which_clock, int flags, const struct __kernel_timespec* rqtp,
+                         struct __kernel_timespec* rmtp);
 int shim_exit_group(int error_code);
 int shim_epoll_wait(int epfd, struct __kernel_epoll_event* events, int maxevents, int timeout_ms);
 int shim_epoll_ctl(int epfd, int op, int fd, struct __kernel_epoll_event* event);
@@ -800,11 +815,11 @@ int shim_fallocate(int fd, int mode, loff_t offset, loff_t len);
 int shim_timerfd_settime(int ufd, int flags, const struct __kernel_itimerspec* utmr,
                          struct __kernel_itimerspec* otmr);
 int shim_timerfd_gettime(int ufd, struct __kernel_itimerspec* otmr);
-int shim_accept4(int sockfd, struct sockaddr* addr, socklen_t* addrlen, int flags);
+int shim_accept4(int sockfd, struct sockaddr* addr, int* addrlen, int flags);
 int shim_signalfd4(int ufd, __sigset_t* user_mask, size_t sizemask, int flags);
 int shim_eventfd2(unsigned int count, int flags);
 int shim_epoll_create1(int flags);
-int shim_dup3(int oldfd, int newfd, int flags);
+int shim_dup3(unsigned int oldfd, unsigned int newfd, int flags);
 int shim_pipe2(int* fildes, int flags);
 int shim_inotify_init1(int flags);
 int shim_preadv(unsigned long fd, const struct iovec* vec, unsigned long vlen, unsigned long pos_l,
@@ -814,17 +829,17 @@ int shim_pwritev(unsigned long fd, const struct iovec* vec, unsigned long vlen, 
 int shim_rt_tgsigqueueinfo(pid_t tgid, pid_t pid, int sig, siginfo_t* uinfo);
 int shim_perf_event_open(struct perf_event_attr* attr_uptr, pid_t pid, int cpu, int group_fd,
                          int flags);
-ssize_t shim_recvmmsg(int sockfd, struct mmsghdr* msg, size_t vlen, int flags,
+ssize_t shim_recvmmsg(int sockfd, struct mmsghdr* msg, unsigned int vlen, int flags,
                       struct __kernel_timespec* timeout);
 int shim_prlimit64(pid_t pid, int resource, const struct __kernel_rlimit64* new_rlim,
                    struct __kernel_rlimit64* old_rlim);
-ssize_t shim_sendmmsg(int sockfd, struct mmsghdr* msg, size_t vlen, int flags);
+ssize_t shim_sendmmsg(int sockfd, struct mmsghdr* msg, unsigned int vlen, int flags);
+int shim_getcpu(unsigned* cpu, unsigned* node, struct getcpu_cache* unused);
 
 /* libos call wrappers */
 int shim_msgpersist(int msqid, int cmd);
 int shim_benchmark_rpc(pid_t pid, int times, const void* buf, size_t size);
 size_t shim_send_rpc(pid_t pid, const void* buf, size_t size);
 size_t shim_recv_rpc(pid_t* pid, void* buf, size_t size);
-int shim_checkpoint(const char* filename);
 
 #endif /* _SHIM_TABLE_H_ */

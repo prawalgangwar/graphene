@@ -1,35 +1,35 @@
+#include <asm/errno.h>
 #include <hex.h>
 #include <pal_linux.h>
 #include <pal_rtld.h>
-#include "sgx_internal.h"
+
+#include "gsgx.h"
 #include "sgx_arch.h"
 #include "sgx_enclave.h"
-#include "graphene-sgx.h"
+#include "sgx_internal.h"
 
-#include <asm/errno.h>
+static int g_gsgx_device = -1;
+static int g_isgx_device = -1;
 
-int gsgx_device = -1;
-int isgx_device = -1;
-#define ISGX_FILE "/dev/isgx"
-
-void * zero_page;
+static void* g_zero_pages       = NULL;
+static size_t g_zero_pages_size = 0;
 
 int open_gsgx(void)
 {
-    gsgx_device = INLINE_SYSCALL(open, 3, GSGX_FILE, O_RDWR | O_CLOEXEC, 0);
-    if (IS_ERR(gsgx_device)) {
+    g_gsgx_device = INLINE_SYSCALL(open, 3, GSGX_FILE, O_RDWR | O_CLOEXEC, 0);
+    if (IS_ERR(g_gsgx_device)) {
         SGX_DBG(DBG_E, "Cannot open device " GSGX_FILE ". Please make sure the"
-                " \'graphene_sgx\' kernel module is loaded.\n");
-        return -ERRNO(gsgx_device);
+                " Graphene SGX kernel module is loaded.\n");
+        return -ERRNO(g_gsgx_device);
     }
 
-    isgx_device = INLINE_SYSCALL(open, 3, ISGX_FILE, O_RDWR | O_CLOEXEC, 0);
-    if (IS_ERR(isgx_device)) {
+    g_isgx_device = INLINE_SYSCALL(open, 3, ISGX_FILE, O_RDWR | O_CLOEXEC, 0);
+    if (IS_ERR(g_isgx_device)) {
         SGX_DBG(DBG_E, "Cannot open device " ISGX_FILE ". Please make sure the"
                 " Intel SGX kernel module is loaded.\n");
-        INLINE_SYSCALL(close, 1, gsgx_device);
-        gsgx_device = -1;
-        return -ERRNO(isgx_device);
+        INLINE_SYSCALL(close, 1, g_gsgx_device);
+        g_gsgx_device = -1;
+        return -ERRNO(g_isgx_device);
     }
 
     return 0;
@@ -52,7 +52,10 @@ int read_enclave_token(int token_file, sgx_arch_token_t * token)
     if (IS_ERR(bytes))
         return -ERRNO(bytes);
 
-    SGX_DBG(DBG_I, "read token:\n");
+#ifdef SGX_DCAP
+    SGX_DBG(DBG_I, "Read dummy DCAP token\n");
+#else
+    SGX_DBG(DBG_I, "Read token:\n");
     SGX_DBG(DBG_I, "    valid:                 0x%08x\n",   token->body.valid);
     SGX_DBG(DBG_I, "    attr.flags:            0x%016lx\n", token->body.attributes.flags);
     SGX_DBG(DBG_I, "    attr.xfrm:             0x%016lx\n", token->body.attributes.xfrm);
@@ -64,6 +67,7 @@ int read_enclave_token(int token_file, sgx_arch_token_t * token)
     SGX_DBG(DBG_I, "    LE masked_misc_select: 0x%08x\n",   token->masked_misc_select_le);
     SGX_DBG(DBG_I, "    LE attr.flags:         0x%016lx\n", token->attributes_le.flags);
     SGX_DBG(DBG_I, "    LE attr.xfrm:          0x%016lx\n", token->attributes_le.xfrm);
+#endif
 
     return 0;
 }
@@ -88,26 +92,13 @@ int read_enclave_sigstruct(int sigfile, sgx_arch_enclave_css_t * sig)
     return 0;
 }
 
-#define SE_LEAF    0x12
-
-static inline void cpuid(uint32_t leaf, uint32_t subleaf, uint32_t info[4])
-{
-    __asm__ volatile("cpuid"
-                 : "=a"(info[0]),
-                   "=b"(info[1]),
-                   "=c"(info[2]),
-                   "=d"(info[3])
-                 : "a"(leaf),
-                   "c"(subleaf));
-}
-
 static size_t get_ssaframesize (uint64_t xfrm)
 {
     uint32_t cpuinfo[4];
     uint64_t xfrm_ex;
     size_t xsave_size = 0;
 
-    cpuid(SE_LEAF, 1, cpuinfo);
+    cpuid(INTEL_SGX_LEAF, 1, cpuinfo);
     xfrm_ex = ((uint64_t) cpuinfo[3] << 32) + cpuinfo[2];
 
     for (int i = 2; i < 64; i++)
@@ -127,7 +118,7 @@ bool is_wrfsbase_supported (void)
 
     if (!(cpuinfo[1] & 0x1)) {
         SGX_DBG(DBG_E, "The WRFSBASE instruction is not permitted on this"
-                " platform. Please make sure the \'graphene_sgx\' kernel module"
+                " platform. Please make sure the Graphene SGX kernel module"
                 " is loaded properly.\n");
         return false;
     }
@@ -141,17 +132,6 @@ int create_enclave(sgx_arch_secs_t * secs,
     assert(secs->size && IS_POWER_OF_2(secs->size));
     assert(IS_ALIGNED(secs->base, secs->size));
 
-    int flags = MAP_SHARED;
-
-    if (!zero_page) {
-        zero_page = (void *)
-            INLINE_SYSCALL(mmap, 6, NULL, g_page_size,
-                           PROT_READ, MAP_PRIVATE|MAP_ANONYMOUS,
-                           -1, 0);
-        if (IS_ERR_P(zero_page))
-            return -ENOMEM;
-    }
-
     secs->ssa_frame_size = get_ssaframesize(token->body.attributes.xfrm) / g_page_size;
     secs->misc_select = token->masked_misc_select_le;
     memcpy(&secs->attributes, &token->body.attributes, sizeof(sgx_attributes_t));
@@ -163,42 +143,37 @@ int create_enclave(sgx_arch_secs_t * secs,
      * EINIT in https://software.intel.com/sites/default/files/managed/48/88/329298-002.pdf). */
 
     uint64_t addr = INLINE_SYSCALL(mmap, 6, secs->base, secs->size,
-                                   PROT_READ|PROT_WRITE|PROT_EXEC,
-                                   flags|MAP_FIXED, isgx_device, 0);
+                                   PROT_NONE, /* newer DCAP driver requires such initial mmap */
+#ifdef SGX_DCAP_16_OR_LATER
+                                   MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+#else
+                                   MAP_FIXED | MAP_SHARED, g_isgx_device, 0);
+#endif
 
     if (IS_ERR_P(addr)) {
-        if (ERRNO_P(addr) == 1 && (flags | MAP_FIXED))
+        if (ERRNO_P(addr) == EPERM) {
             pal_printf("Permission denied on mapping enclave. "
                        "You may need to set sysctl vm.mmap_min_addr to zero\n");
+        }
 
-        SGX_DBG(DBG_I, "enclave ECREATE failed in allocating EPC memory "
-                "(errno = %ld)\n", ERRNO_P(addr));
+        SGX_DBG(DBG_I, "ECREATE failed in allocating EPC memory (errno = %ld)\n", ERRNO_P(addr));
         return -ENOMEM;
     }
 
     assert(secs->base == addr);
 
-#if SDK_DRIVER_VERSION >= KERNEL_VERSION(1, 8, 0)
     struct sgx_enclave_create param = {
         .src = (uint64_t) secs,
     };
-    int ret = INLINE_SYSCALL(ioctl, 3, isgx_device, SGX_IOC_ENCLAVE_CREATE,
-                         &param);
-#else
-    struct gsgx_enclave_create param = {
-        .src = (uint64_t) secs,
-    };
-    int ret = INLINE_SYSCALL(ioctl, 3, gsgx_device, GSGX_IOCTL_ENCLAVE_CREATE,
-                         &param);
-#endif
+    int ret = INLINE_SYSCALL(ioctl, 3, g_isgx_device, SGX_IOC_ENCLAVE_CREATE, &param);
 
     if (IS_ERR(ret)) {
-        SGX_DBG(DBG_I, "enclave ECREATE failed in enclave creation ioctl - %d\n", ERRNO(ret));
+        SGX_DBG(DBG_I, "ECREATE failed in enclave creation ioctl (errno = %d)\n", ERRNO(ret));
         return -ERRNO(ret);
     }
 
     if (ret) {
-        SGX_DBG(DBG_I, "enclave ECREATE failed - %d\n", ret);
+        SGX_DBG(DBG_I, "ECREATE failed (errno = %d)\n", ret);
         return -EPERM;
     }
 
@@ -226,6 +201,17 @@ int add_pages_to_enclave(sgx_arch_secs_t * secs,
 {
     sgx_arch_sec_info_t secinfo;
     int ret;
+
+    if (!g_zero_pages) {
+        /* initialize with just one page */
+        g_zero_pages = (void*)INLINE_SYSCALL(mmap, 6, NULL, g_page_size, PROT_READ,
+                                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (IS_ERR_P(g_zero_pages)) {
+            SGX_DBG(DBG_I, "Cannot mmap zero pages %ld\n", ERRNO_P(g_zero_pages));
+            return -ENOMEM;
+        }
+        g_zero_pages_size = g_page_size;
+    }
 
     memset(&secinfo, 0, sizeof(sgx_arch_sec_info_t));
 
@@ -266,50 +252,82 @@ int add_pages_to_enclave(sgx_arch_secs_t * secs,
         SGX_DBG(DBG_I, "adding pages to enclave: %p-%p [%s:%s] (%s)%s\n",
                 addr, addr + size, t, p, comment, m);
 
+#ifdef SGX_DCAP_16_OR_LATER
+    if (!user_addr && g_zero_pages_size < size) {
+        /* not enough contigious zero pages to back up enclave pages, allocate more */
+        ret = INLINE_SYSCALL(munmap, 2, g_zero_pages, g_zero_pages_size);
+        if (IS_ERR(ret)) {
+            SGX_DBG(DBG_I, "Cannot unmap zero pages %d\n", ret);
+            return -ERRNO(ret);
+        }
 
-#if SDK_DRIVER_VERSION >= KERNEL_VERSION(1, 8, 0)
+        g_zero_pages = (void*)INLINE_SYSCALL(mmap, 6, NULL, size, PROT_READ,
+                                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (IS_ERR_P(g_zero_pages)) {
+            SGX_DBG(DBG_I, "Cannot map zero pages %ld\n", ERRNO_P(g_zero_pages));
+            return -ENOMEM;
+        }
+        g_zero_pages_size = size;
+    }
+
+    /* newer DCAP driver (version 1.6+) allows adding a range of pages for performance, use it */
+    struct sgx_enclave_add_pages param = {
+        .offset     = (uint64_t)addr,
+        .src        = (uint64_t)(user_addr ? : g_zero_pages),
+        .length     = size,
+        .secinfo    = (uint64_t)&secinfo,
+        .flags      = skip_eextend ? 0 : SGX_PAGE_MEASURE,
+        .count      = 0,  /* output parameter, will be checked after IOCTL */
+    };
+
+    ret = INLINE_SYSCALL(ioctl, 3, g_isgx_device, SGX_IOC_ENCLAVE_ADD_PAGES, &param);
+    if (IS_ERR(ret)) {
+        SGX_DBG(DBG_I, "Enclave EADD returned %d\n", ret);
+        return -ERRNO(ret);
+    }
+    if (param.count != param.length) {
+        SGX_DBG(DBG_I, "Enclave EADD didn't add all pages: added %lluB but expected %lluB\n",
+                param.count, param.length);
+        return -ERRNO(ret);
+    }
+
+    /* ask Intel SGX driver to actually mmap the added enclave pages */
+    uint64_t mapped = INLINE_SYSCALL(mmap, 6, secs->base + addr, size, prot,
+                                     MAP_FIXED | MAP_SHARED, g_isgx_device, 0);
+    if (IS_ERR_P(mapped)) {
+        SGX_DBG(DBG_I, "Cannot map enclave pages %ld\n", ERRNO_P(mapped));
+        return -EACCES;
+    }
+#else
+    /* older drivers (DCAP v1.5- and old out-of-tree) only supports adding one page at a time */
     struct sgx_enclave_add_page param = {
         .addr       = secs->base + (uint64_t) addr,
-        .src        = (uint64_t) (user_addr ? : zero_page),
+        .src        = (uint64_t) (user_addr ? : g_zero_pages),
         .secinfo    = (uint64_t) &secinfo,
         .mrmask     = skip_eextend ? 0 : (uint16_t) -1,
     };
 
     uint64_t added_size = 0;
     while (added_size < size) {
-        ret = INLINE_SYSCALL(ioctl, 3, isgx_device,
-                             SGX_IOC_ENCLAVE_ADD_PAGE, &param);
+        ret = INLINE_SYSCALL(ioctl, 3, g_isgx_device, SGX_IOC_ENCLAVE_ADD_PAGE, &param);
         if (IS_ERR(ret)) {
-            SGX_DBG(DBG_I, "Enclave add page returned %d\n", ret);
+            SGX_DBG(DBG_I, "Enclave EADD returned %d\n", ret);
             return -ERRNO(ret);
         }
 
         param.addr += g_page_size;
-        if (param.src != (uint64_t) zero_page) param.src += g_page_size;
+        if (param.src != (uint64_t)g_zero_pages)
+            param.src += g_page_size;
         added_size += g_page_size;
     }
-#else
-    struct gsgx_enclave_add_pages param = {
-        .addr       = secs->baseaddr + (uint64_t) addr,
-        .user_addr  = (uint64_t) user_addr,
-        .size       = size,
-        .secinfo    = (uint64_t) &secinfo,
-        .flags      = skip_eextend ? GSGX_ENCLAVE_ADD_PAGES_SKIP_EEXTEND : 0,
-    };
 
-    if (!user_addr) {
-        param.user_addr = (unsigned long) zero_page;
-        param.flags |= GSGX_ENCLAVE_ADD_PAGES_REPEAT_SRC;
-    }
-
-    ret = INLINE_SYSCALL(ioctl, 3, gsgx_device,
-                         GSGX_IOCTL_ENCLAVE_ADD_PAGES,
-                         &param);
+    /* need to change permissions for EADDed pages since the initial mmap was with PROT_NONE */
+    ret = mprotect(secs->base + addr, size, prot);
     if (IS_ERR(ret)) {
-        SGX_DBG(DBG_I, "Enclave add page returned %d\n", ret);
+        SGX_DBG(DBG_I, "Changing protections of EADDed pages returned %d\n", ret);
         return -ERRNO(ret);
     }
-#endif
+#endif /* SGX_DCAP_16_OR_LATER */
 
     return 0;
 }
@@ -318,33 +336,25 @@ int init_enclave(sgx_arch_secs_t * secs,
                  sgx_arch_enclave_css_t * sigstruct,
                  sgx_arch_token_t * token)
 {
-    unsigned long enclave_valid_addr =
-                secs->base + secs->size - g_page_size;
+#ifdef SGX_DCAP
+    __UNUSED(token);
+#endif
+    unsigned long enclave_valid_addr = secs->base + secs->size - g_page_size;
 
     SGX_DBG(DBG_I, "enclave initializing:\n");
     SGX_DBG(DBG_I, "    enclave id:   0x%016lx\n", enclave_valid_addr);
-    SGX_DBG(DBG_I, "    enclave hash:");
-    for (size_t i = 0 ; i < sizeof(sgx_measurement_t) ; i++)
-        SGX_DBG(DBG_I, " %02x", sigstruct->body.enclave_hash.m[i]);
-    SGX_DBG(DBG_I, "\n");
+    SGX_DBG(DBG_I, "    mr_enclave:   %s\n", ALLOCA_BYTES2HEXSTR(sigstruct->body.enclave_hash.m));
 
-#if SDK_DRIVER_VERSION >= KERNEL_VERSION(1, 8, 0)
     struct sgx_enclave_init param = {
+#ifndef SGX_DCAP_16_OR_LATER
         .addr           = enclave_valid_addr,
-        .sigstruct      = (uint64_t) sigstruct,
-        .einittoken     = (uint64_t) token,
-    };
-    int ret = INLINE_SYSCALL(ioctl, 3, isgx_device, SGX_IOC_ENCLAVE_INIT,
-                             &param);
-#else
-    struct gsgx_enclave_init param = {
-        .addr           = enclave_valid_addr,
-        .sigstruct      = (uint64_t) sigstruct,
-        .einittoken     = (uint64_t) token,
-    };
-    int ret = INLINE_SYSCALL(ioctl, 3, gsgx_device, GSGX_IOCTL_ENCLAVE_INIT,
-                             &param);
 #endif
+        .sigstruct      = (uint64_t) sigstruct,
+#ifndef SGX_DCAP
+        .einittoken     = (uint64_t) token,
+#endif
+    };
+    int ret = INLINE_SYSCALL(ioctl, 3, g_isgx_device, SGX_IOC_ENCLAVE_INIT, &param);
 
     if (IS_ERR(ret)) {
         return -ERRNO(ret);
@@ -371,6 +381,13 @@ int init_enclave(sgx_arch_secs_t * secs,
         }
         SGX_DBG(DBG_I, "enclave EINIT failed - %s\n", error);
         return -EPERM;
+    }
+
+    /* all enclave pages were EADDed, don't need zero pages anymore */
+    ret = INLINE_SYSCALL(munmap, 2, g_zero_pages, g_zero_pages_size);
+    if (IS_ERR(ret)) {
+        SGX_DBG(DBG_I, "Cannot unmap zero pages %d\n", ret);
+        return -ERRNO(ret);
     }
 
     return 0;

@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,7 +16,7 @@ enum { PARALLEL, SERIAL, IN_PROCESS } mode = PARALLEL;
 int pipefds[2], key;
 
 /* server always sends messages */
-void server(void) {
+static void server(void) {
     struct timeval tv1, tv2;
     int semid;
     struct sembuf buf;
@@ -49,7 +50,10 @@ void server(void) {
     if (mode == PARALLEL) {
         close(pipefds[0]);
         char byte = 0;
-        write(pipefds[1], &byte, 1);
+        if (write(pipefds[1], &byte, 1) != 1) {
+            perror("write error");
+            exit(1);
+        }
 
         buf.sem_num = 1;
         buf.sem_op  = -1;
@@ -67,7 +71,7 @@ void server(void) {
 }
 
 /* client always sends messages */
-void client(void) {
+static void client(void) {
     struct timeval tv1, tv2;
     int semid;
     struct sembuf buf;
@@ -75,7 +79,10 @@ void client(void) {
     if (mode == PARALLEL) {
         close(pipefds[1]);
         char byte = 0;
-        read(pipefds[0], &byte, 1);
+        if (read(pipefds[0], &byte, 1) != 1) {
+            perror("read error");
+            exit(1);
+        }
     }
 
     if ((semid = semget(key, 0, 0)) < 0) {
@@ -154,7 +161,10 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    pipe(pipefds);
+    if (pipe(pipefds) < 0) {
+        perror("pipe error");
+        return 1;
+    }
 
     /* server to be the parent and client to be the child */
     if (argc == 1) {

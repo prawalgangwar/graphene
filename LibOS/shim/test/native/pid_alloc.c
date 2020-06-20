@@ -1,12 +1,12 @@
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#define __USE_GNU
 #include <sched.h>
 #include <sys/time.h>
 #include <sys/wait.h>
 
-int func(void* arg) {
+static int func(void* arg) {
     return 0;
 }
 

@@ -1,18 +1,5 @@
-/* Copyright (C) 2014 Stony Brook University
-   This file is part of Graphene Library OS.
-
-   Graphene Library OS is free software: you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public License
-   as published by the Free Software Foundation, either version 3 of the
-   License, or (at your option) any later version.
-
-   Graphene Library OS is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
+/* Copyright (C) 2014 Stony Brook University */
 
 /*
  * path.c
@@ -65,12 +52,13 @@ static inline bool find_prev_slash_offset(const char* path, size_t* offset) {
 
 /*
  * Before calling this function *size_ptr should hold the size of buf.
- * After returning it holds number of bytes actually written to it (excluding the ending '\0').
+ * After returning it holds number of bytes actually written to it (excluding the ending '\0'). This
+ * number is never greater than the size of the input path.
  */
 int get_norm_path(const char* path, char* buf, size_t* size_ptr) {
-    if (!path || !buf || !size_ptr) {
-        return -PAL_ERROR_INVAL;
-    }
+    assert(path && buf && size_ptr);
+    size_t path_size = strlen(path) + 1;
+    __UNUSED(path_size);  // used only for an assert at the end
 
     size_t size = *size_ptr;
     if (!size) {
@@ -145,6 +133,7 @@ int get_norm_path(const char* path, char* buf, size_t* size_ptr) {
     buf[offset] = '\0';
 
     *size_ptr = ret_size + offset;
+    assert(*size_ptr <= path_size);
 
     return 0;
 }

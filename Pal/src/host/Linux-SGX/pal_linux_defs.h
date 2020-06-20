@@ -2,7 +2,8 @@
 #define PAL_LINUX_DEFS_H
 
 #define THREAD_STACK_SIZE (PRESET_PAGESIZE * 512)  /* 2MB untrusted stack */
-#define ALT_STACK_SIZE    PRESET_PAGESIZE
+#define ALT_STACK_SIZE    (PRESET_PAGESIZE * 16)   /* 64KB untrusted signal stack */
+#define RPC_STACK_SIZE    (PRESET_PAGESIZE * 2)
 
 #define ENCLAVE_HIGH_ADDRESS    0x800000000
 #define SSAFRAMENUM         2
@@ -17,8 +18,6 @@
 #define DEBUG_OCALL         0
 
 #define TRUSTED_STUB_SIZE   (PRESET_PAGESIZE * 4UL)
-
-#define CACHE_FILE_STUBS    1
 
 //#define USE_AES_NI          1
 

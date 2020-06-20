@@ -3,6 +3,12 @@
 #include "pal_defs.h"
 #include "pal_error.h"
 
+// Required for asserts inside get_norm_path().
+noreturn void __abort(void) {
+    warn("ABORTED\n");
+    DkProcessExit(1);
+}
+
 static const char* get_norm_path_cases[][2] = {
     {"/", "/"},
     {"/a/b/c", "/a/b/c"},
@@ -43,9 +49,9 @@ static size_t cases_len;
 static int (*func_to_test)(const char*, char*, size_t*);
 static const char* func_name;
 
-static int run_test(void) {
-    char buf[URI_MAX] = {0};
+char buf[URI_MAX] = {0};
 
+static int run_test(void) {
     for (size_t i = 0; i < cases_len; i++) {
         size_t size = sizeof(buf);
         int ret     = func_to_test(cases[i][0], buf, &size);

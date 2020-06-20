@@ -1,18 +1,5 @@
-/* Copyright (C) 2014 Stony Brook University
-   This file is part of Graphene Library OS.
-
-   Graphene Library OS is free software: you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public License
-   as published by the Free Software Foundation, either version 3 of the
-   License, or (at your option) any later version.
-
-   Graphene Library OS is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
+/* Copyright (C) 2014 Stony Brook University */
 
 #ifndef PAL_SECURITY_H
 #define PAL_SECURITY_H
@@ -62,15 +49,10 @@ extern struct pal_sec {
     unsigned int process_id;
     int random_device;
 
-    /* pipes and sockets */
-    unsigned long pipe_prefix_id;
-
     /* for debugger */
     void (*_dl_debug_state)(void);
     struct r_debug* _r_debug;
 } pal_sec;
-
-#define PROC_INIT_FD 255
 
 #define RANDGEN_DEVICE "/dev/urandom"
 

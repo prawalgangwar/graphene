@@ -1,18 +1,5 @@
-/* Copyright (C) 2014 Stony Brook University
-   This file is part of Graphene Library OS.
-
-   Graphene Library OS is free software: you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public License
-   as published by the Free Software Foundation, either version 3 of the
-   License, or (at your option) any later version.
-
-   Graphene Library OS is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
+/* Copyright (C) 2014 Stony Brook University */
 
 /*
  * db_memory.c
@@ -20,33 +7,35 @@
  * This files contains APIs that allocate, free or protect virtual memory.
  */
 
-#include "pal_defs.h"
-#include "pal_linux_defs.h"
+#include "api.h"
 #include "pal.h"
+#include "pal_debug.h"
+#include "pal_defs.h"
+#include "pal_error.h"
+#include "pal_flags_conv.h"
 #include "pal_internal.h"
 #include "pal_linux.h"
-#include "pal_error.h"
-#include "pal_debug.h"
-#include "api.h"
+#include "pal_linux_defs.h"
 
-#include <asm/mman.h>
 #include <asm/fcntl.h>
+#include <asm/mman.h>
 
-bool _DkCheckMemoryMappable (const void * addr, size_t size)
-{
+bool _DkCheckMemoryMappable(const void* addr, size_t size) {
     return (addr < DATA_END && addr + size > TEXT_START);
 }
 
-int _DkVirtualMemoryAlloc (void ** paddr, size_t size, int alloc_type,
-                           int prot)
-{
-    void * addr = *paddr, * mem = addr;
+int _DkVirtualMemoryAlloc(void** paddr, size_t size, int alloc_type, int prot) {
+    assert(WITHIN_MASK(alloc_type, PAL_ALLOC_MASK));
+    assert(WITHIN_MASK(prot,       PAL_PROT_MASK));
 
-    int flags = HOST_FLAGS(alloc_type, prot|PAL_PROT_WRITECOPY);
-    prot = HOST_PROT(prot);
+    void* addr = *paddr;
+    void* mem = addr;
 
-    flags |= MAP_ANONYMOUS|(addr ? MAP_FIXED : 0);
-    mem = (void *) ARCH_MMAP(addr, size, prot, flags, -1, 0);
+    int flags = PAL_MEM_FLAGS_TO_LINUX(alloc_type, prot | PAL_PROT_WRITECOPY);
+    prot = PAL_PROT_TO_LINUX(prot);
+
+    flags |= MAP_ANONYMOUS | (addr ? MAP_FIXED : 0);
+    mem = (void*)ARCH_MMAP(addr, size, prot, flags, -1, 0);
 
     if (IS_ERR_P(mem))
         return unix_to_pal_error(ERRNO_P(mem));
@@ -62,10 +51,8 @@ int _DkVirtualMemoryFree (void * addr, size_t size)
     return IS_ERR(ret) ? unix_to_pal_error(ERRNO(ret)) : 0;
 }
 
-int _DkVirtualMemoryProtect (void * addr, size_t size, int prot)
-{
-    int ret = INLINE_SYSCALL(mprotect, 3, addr, size, HOST_PROT(prot));
-
+int _DkVirtualMemoryProtect(void* addr, size_t size, int prot) {
+    int ret = INLINE_SYSCALL(mprotect, 3, addr, size, PAL_PROT_TO_LINUX(prot));
     return IS_ERR(ret) ? unix_to_pal_error(ERRNO(ret)) : 0;
 }
 

@@ -4,6 +4,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <sys/types.h>
 #include "linux_types.h"
 #include "pal.h"
 #include "sgx_arch.h"
@@ -17,7 +18,7 @@
  */
 #pragma pack(push, 1)
 
-typedef int (*sgx_ocall_fn_t)(void*);
+typedef long (*sgx_ocall_fn_t)(void*);
 
 enum {
     OCALL_EXIT = 0,
@@ -28,13 +29,14 @@ enum {
     OCALL_CLOSE,
     OCALL_READ,
     OCALL_WRITE,
+    OCALL_PREAD,
+    OCALL_PWRITE,
     OCALL_FSTAT,
     OCALL_FIONREAD,
     OCALL_FSETNONBLOCK,
     OCALL_FCHMOD,
     OCALL_FSYNC,
     OCALL_FTRUNCATE,
-    OCALL_LSEEK,
     OCALL_MKDIR,
     OCALL_GETDENTS,
     OCALL_RESUME_THREAD,
@@ -55,8 +57,8 @@ enum {
     OCALL_RENAME,
     OCALL_DELETE,
     OCALL_LOAD_DEBUG,
-    OCALL_GET_ATTESTATION,
     OCALL_EVENTFD,
+    OCALL_GET_QUOTE,
     OCALL_NR,
 };
 
@@ -108,6 +110,20 @@ typedef struct {
 
 typedef struct {
     int ms_fd;
+    void* ms_buf;
+    size_t ms_count;
+    off_t ms_offset;
+} ms_ocall_pread_t;
+
+typedef struct {
+    int ms_fd;
+    const void* ms_buf;
+    size_t ms_count;
+    off_t ms_offset;
+} ms_ocall_pwrite_t;
+
+typedef struct {
+    int ms_fd;
     struct stat ms_stat;
 } ms_ocall_fstat_t;
 
@@ -135,12 +151,6 @@ typedef struct {
 } ms_ocall_ftruncate_t;
 
 typedef struct {
-    int ms_fd;
-    uint64_t ms_offset;
-    int ms_whence;
-} ms_ocall_lseek_t;
-
-typedef struct {
     const char * ms_pathname;
     unsigned short ms_mode;
 } ms_ocall_mkdir_t;
@@ -155,13 +165,12 @@ typedef struct {
     unsigned int ms_pid;
     const char * ms_uri;
     int ms_stream_fd;
-    int ms_cargo_fd;
     int ms_nargs;
     const char * ms_args[];
 } ms_ocall_create_process_t;
 
 typedef struct {
-    int* ms_futex;
+    uint32_t* ms_futex;
     int ms_op, ms_val;
     int64_t ms_timeout_us;
 } ms_ocall_futex_t;
@@ -177,14 +186,14 @@ typedef struct {
     int ms_protocol;
     int ms_ipv6_v6only;
     const struct sockaddr* ms_addr;
-    unsigned int ms_addrlen;
+    size_t ms_addrlen;
     struct sockopt ms_sockopt;
 } ms_ocall_listen_t;
 
 typedef struct {
     int ms_sockfd;
-    struct sockaddr * ms_addr;
-    unsigned int ms_addrlen;
+    struct sockaddr* ms_addr;
+    size_t ms_addrlen;
     struct sockopt ms_sockopt;
 } ms_ocall_accept_t;
 
@@ -194,38 +203,38 @@ typedef struct {
     int ms_protocol;
     int ms_ipv6_v6only;
     const struct sockaddr* ms_addr;
-    unsigned int ms_addrlen;
+    size_t ms_addrlen;
     struct sockaddr* ms_bind_addr;
-    unsigned int ms_bind_addrlen;
+    size_t ms_bind_addrlen;
     struct sockopt ms_sockopt;
 } ms_ocall_connect_t;
 
 typedef struct {
     PAL_IDX ms_sockfd;
-    void * ms_buf;
-    unsigned int ms_count;
-    struct sockaddr * ms_addr;
-    unsigned int ms_addrlen;
-    void * ms_control;
-    uint64_t ms_controllen;
+    void* ms_buf;
+    size_t ms_count;
+    struct sockaddr* ms_addr;
+    size_t ms_addrlen;
+    void* ms_control;
+    size_t ms_controllen;
 } ms_ocall_recv_t;
 
 typedef struct {
     PAL_IDX ms_sockfd;
-    const void * ms_buf;
-    unsigned int ms_count;
-    const struct sockaddr * ms_addr;
-    unsigned int ms_addrlen;
-    void * ms_control;
-    uint64_t ms_controllen;
+    const void* ms_buf;
+    size_t ms_count;
+    const struct sockaddr* ms_addr;
+    size_t ms_addrlen;
+    void* ms_control;
+    size_t ms_controllen;
 } ms_ocall_send_t;
 
 typedef struct {
     int ms_sockfd;
     int ms_level;
     int ms_optname;
-    const void * ms_optval;
-    unsigned int ms_optlen;
+    const void* ms_optval;
+    size_t ms_optlen;
 } ms_ocall_setsockopt_t;
 
 typedef struct {
@@ -243,7 +252,7 @@ typedef struct {
 
 typedef struct {
     struct pollfd* ms_fds;
-    int ms_nfds;
+    size_t ms_nfds;
     int64_t ms_timeout_us;
 } ms_ocall_poll_t;
 
@@ -257,17 +266,17 @@ typedef struct {
 } ms_ocall_delete_t;
 
 typedef struct {
-    sgx_spid_t        ms_spid;
-    const char*       ms_subkey;
-    bool              ms_linkable;
-    sgx_report_t      ms_report;
-    sgx_quote_nonce_t ms_nonce;
-    sgx_attestation_t ms_attestation;
-} ms_ocall_get_attestation_t;
-
-typedef struct {
     unsigned int ms_initval;
     int          ms_flags;
 } ms_ocall_eventfd_t;
+
+typedef struct {
+    sgx_spid_t        ms_spid;
+    bool              ms_linkable;
+    sgx_report_t      ms_report;
+    sgx_quote_nonce_t ms_nonce;
+    char*             ms_quote;
+    size_t            ms_quote_len;
+} ms_ocall_get_quote_t;
 
 #pragma pack(pop)

@@ -2,6 +2,7 @@
 
 import os
 import unittest
+import shutil
 import subprocess
 
 from regression import (
@@ -11,7 +12,7 @@ from regression import (
 
 class TC_00_Unittests(RegressionTestCase):
     def test_000_spinlock(self):
-        stdout, _ = self.run_binary(['spinlock'])
+        stdout, _ = self.run_binary(['spinlock'], timeout=20)
 
         self.assertIn('Test successful!', stdout)
 
@@ -36,16 +37,31 @@ class TC_01_Bootstrap(RegressionTestCase):
         self.assertIn('argv[3] = c', stdout)
         self.assertIn('argv[4] = d', stdout)
 
+    def test_102_argv_from_file(self):
+        args = ['bootstrap', 'THIS', 'SHOULD GO', 'TO', '\nTHE\n', 'APP']
+        result = subprocess.run(['../../../../Tools/argv_serializer'] + args,
+                                stdout=subprocess.PIPE, check=True)
+        with open('argv_test_input', 'wb') as f:
+            f.write(result.stdout)
+        try:
+            manifest = self.get_manifest('argv_from_file')
+            stdout, _ = self.run_binary([manifest, 'WRONG', 'ARGUMENTS'])
+            self.assertIn('# of Arguments: %d' % len(args), stdout)
+            for i, arg in enumerate(args):
+                self.assertIn('argv[%d] = %s' % (i, arg), stdout)
+        finally:
+            os.remove('argv_test_input')
+
     @unittest.skipUnless(HAS_SGX,
         'This test is only meaningful on SGX PAL because only SGX catches raw '
         'syscalls and redirects to Graphene\'s LibOS. If we will add seccomp to '
         'Linux PAL, then we should allow this test on Linux PAL as well.')
-    def test_102_basic_bootstrapping_static(self):
+    def test_103_basic_bootstrapping_static(self):
         # bootstrap_static
         stdout, _ = self.run_binary(['bootstrap_static'])
         self.assertIn('Hello world (bootstrap_static)!', stdout)
 
-    def test_103_basic_bootstrapping_pie(self):
+    def test_104_basic_bootstrapping_pie(self):
         # bootstrap_pie
         stdout, _ = self.run_binary(['bootstrap_pie'])
         self.assertIn('User program started', stdout)
@@ -53,7 +69,7 @@ class TC_01_Bootstrap(RegressionTestCase):
         self.assertIn('argv[0] = bootstrap_pie', stdout)
 
     def test_110_basic_bootstrapping_cxx(self):
-        stdout, _ = self.run_binary(['bootstrap-c++'])
+        stdout, _ = self.run_binary(['bootstrap_c++'])
 
         # Basic Bootstrapping (C++)
         self.assertIn('User Program Started', stdout)
@@ -82,20 +98,32 @@ class TC_01_Bootstrap(RegressionTestCase):
             stdout)
 
     def test_201_exec_same(self):
-        stdout, _ = self.run_binary(['exec_same'])
-        self.assertIn('hello from execv process', stdout)
+        args = [str(i) for i in range(50)]
+        stdout, _ = self.run_binary(['exec_same'] + args, timeout=40)
+        self.assertIn('\n'.join(args), stdout)
 
     def test_202_fork_and_exec(self):
-        stdout, _ = self.run_binary(['fork_and_exec'])
+        stdout, _ = self.run_binary(['fork_and_exec'], timeout=60)
 
         # fork and exec 2 page child binary
         self.assertIn('child exited with status: 0', stdout)
         self.assertIn('test completed successfully', stdout)
 
     def test_203_vfork_and_exec(self):
-        stdout, _ = self.run_binary(['vfork_and_exec'])
+        stdout, _ = self.run_binary(['vfork_and_exec'], timeout=60)
 
         # vfork and exec 2 page child binary
+        self.assertIn('child exited with status: 0', stdout)
+        self.assertIn('test completed successfully', stdout)
+
+    def test_204_system(self):
+        stdout, _ = self.run_binary(['system'], timeout=60)
+        self.assertIn('hello from system', stdout)
+
+    def test_205_exec_fork(self):
+        stdout, _ = self.run_binary(['exec_fork'], timeout=60)
+        self.assertNotIn('Handled SIGCHLD', stdout)
+        self.assertIn('Set up handler for SIGCHLD', stdout)
         self.assertIn('child exited with status: 0', stdout)
         self.assertIn('test completed successfully', stdout)
 
@@ -138,9 +166,10 @@ class TC_01_Bootstrap(RegressionTestCase):
         with self.expect_returncode(134):
             self.run_binary(['abort_multithread'])
 
-    def test_404_sigprocmask(self):
-        with self.expect_returncode(113):
-            self.run_binary(['sigprocmask'])
+    def test_404_sigprocmask_pending(self):
+        stdout, _ = self.run_binary(['sigprocmask_pending'], timeout=60)
+        self.assertIn('Child OK', stdout)
+        self.assertIn('All tests OK', stdout)
 
     def test_500_init_fail(self):
         try:
@@ -151,6 +180,14 @@ class TC_01_Bootstrap(RegressionTestCase):
 
     def test_600_multi_pthread(self):
         stdout, _ = self.run_binary(['multi_pthread'])
+
+        # Multiple thread creation
+        self.assertIn('128 Threads Created', stdout)
+
+    @unittest.skipUnless(HAS_SGX, 'This test is only meaningful on SGX PAL')
+    def test_601_multi_pthread_exitless(self):
+        manifest = self.get_manifest('multi_pthread_exitless')
+        stdout, _ = self.run_binary([manifest], timeout=60)
 
         # Multiple thread creation
         self.assertIn('128 Threads Created', stdout)
@@ -195,6 +232,21 @@ class TC_03_FileCheckPolicy(RegressionTestCase):
         self.assertNotIn('Allowing access to an unknown file due to file_check_policy settings: file:trusted_testfile', stderr)
         self.assertIn('file_check_policy succeeded', stdout)
 
+@unittest.skipUnless(HAS_SGX,
+    'These tests are only meaningful on SGX PAL because only SGX supports attestation.')
+class TC_04_Attestation(RegressionTestCase):
+    def test_000_attestation(self):
+        stdout, _ = self.run_binary(['attestation'], timeout=60)
+        self.assertIn("Test resource leaks in attestation filesystem... SUCCESS", stdout)
+        self.assertIn("Test local attestation... SUCCESS", stdout)
+        self.assertIn("Test quote interface... SUCCESS", stdout)
+
+    def test_001_attestation_stdio(self):
+        stdout, _ = self.run_binary(['attestation', 'test_stdio'], timeout=60)
+        self.assertIn("Test resource leaks in attestation filesystem... SUCCESS", stdout)
+        self.assertIn("Test local attestation... SUCCESS", stdout)
+        self.assertIn("Test quote interface... SUCCESS", stdout)
+
 class TC_30_Syscall(RegressionTestCase):
     def test_000_getcwd(self):
         stdout, _ = self.run_binary(['getcwd'])
@@ -219,6 +271,9 @@ class TC_30_Syscall(RegressionTestCase):
         self.assertIn('fstat returned the fd type as S_IFDIR', stdout)
 
     def test_020_getdents(self):
+        if os.path.exists("root"):
+            shutil.rmtree("root")
+
         # This doesn't catch extraneous entries, but should be fine
         # until the LTP test can be run (need symlink support)
 
@@ -240,6 +295,8 @@ class TC_30_Syscall(RegressionTestCase):
         self.assertIn('getdents64: dir3 [0x4]', stdout)
 
     def test_021_getdents_large_dir(self):
+        if os.path.exists("tmp/large_dir"):
+            shutil.rmtree("tmp/large_dir")
         stdout, _ = self.run_binary(['large_dir_read', 'tmp/large_dir', '3000'])
 
         self.assertIn('Success!', stdout)
@@ -287,7 +344,7 @@ class TC_30_Syscall(RegressionTestCase):
         self.assertIn('Test successful!', stdout)
 
     def test_050_mmap(self):
-        stdout, _ = self.run_binary(['mmap-file'], timeout=60)
+        stdout, _ = self.run_binary(['mmap_file'], timeout=60)
 
         # Private mmap beyond file range
         self.assertIn('mmap test 6 passed', stdout)
@@ -303,21 +360,21 @@ class TC_30_Syscall(RegressionTestCase):
         'On SGX, SIGBUS isn\'t always implemented correctly, for lack '
         'of memory protection. For now, some of these cases won\'t work.')
     def test_051_mmap_sgx(self):
-        stdout, _ = self.run_binary(['mmap-file'], timeout=60)
+        stdout, _ = self.run_binary(['mmap_file'], timeout=60)
 
         # SIGBUS test
         self.assertIn('mmap test 5 passed', stdout)
         self.assertIn('mmap test 8 passed', stdout)
 
     def test_052_large_mmap(self):
-        stdout, _ = self.run_binary(['large-mmap'], timeout=480)
+        stdout, _ = self.run_binary(['large_mmap'], timeout=480)
 
         # Ftruncate
-        self.assertIn('large-mmap: ftruncate OK', stdout)
+        self.assertIn('large_mmap: ftruncate OK', stdout)
 
         # Large mmap
-        self.assertIn('large-mmap: mmap 1 completed OK', stdout)
-        self.assertIn('large-mmap: mmap 2 completed OK', stdout)
+        self.assertIn('large_mmap: mmap 1 completed OK', stdout)
+        self.assertIn('large_mmap: mmap 2 completed OK', stdout)
 
     def test_053_mprotect_file_fork(self):
         stdout, _ = self.run_binary(['mprotect_file_fork'])
@@ -357,6 +414,32 @@ class TC_30_Syscall(RegressionTestCase):
         # Scheduling Syscalls Test
         self.assertIn('Test completed successfully', stdout)
 
+    def test_090_sighandler_reset(self):
+        stdout, _ = self.run_binary(['sighandler_reset'])
+        self.assertIn('Got signal 17', stdout)
+        self.assertIn('Handler was invoked 1 time(s).', stdout)
+
+    def test_091_sigaction_per_process(self):
+        stdout, _ = self.run_binary(['sigaction_per_process'])
+        self.assertIn('TEST OK', stdout)
+
+    def test_092_sighandler_sigpipe(self):
+        try:
+            self.run_binary(['sighandler_sigpipe'])
+            self.fail('expected to return nonzero')
+        except subprocess.CalledProcessError as e:
+            # FIXME: It's unclear what Graphene process should return when the app
+            # inside dies due to a signal.
+            self.assertTrue(e.returncode in [13, 141])
+            stdout = e.stdout.decode()
+            self.assertIn('Got signal 13', stdout)
+            self.assertIn('Got 1 SIGPIPE signal(s)', stdout)
+            self.assertIn('Could not write to pipe: Broken pipe', stdout)
+
+    def test_093_signal_multithread(self):
+        stdout, _ = self.run_binary(['signal_multithread'])
+        self.assertIn('TEST OK', stdout)
+
 @unittest.skipUnless(HAS_SGX,
     'This test is only meaningful on SGX PAL because only SGX catches raw '
     'syscalls and redirects to Graphene\'s LibOS. If we will add seccomp to '
@@ -369,26 +452,48 @@ class TC_31_SyscallSGX(RegressionTestCase):
         self.assertIn('Hello world', stdout)
 
 class TC_40_FileSystem(RegressionTestCase):
-    def test_000_base(self):
-        stdout, _ = self.run_binary(['proc'])
-
-        # Base /proc files present
+    def test_000_proc(self):
+        stdout, _ = self.run_binary(['proc_common'])
         self.assertIn('/proc/1/..', stdout)
         self.assertIn('/proc/1/cwd', stdout)
         self.assertIn('/proc/1/exe', stdout)
         self.assertIn('/proc/1/root', stdout)
         self.assertIn('/proc/1/fd', stdout)
         self.assertIn('/proc/1/maps', stdout)
+        self.assertIn('/proc/self/..', stdout)
+        self.assertIn('/proc/self/cwd', stdout)
+        self.assertIn('/proc/self/exe', stdout)
+        self.assertIn('/proc/self/root', stdout)
+        self.assertIn('/proc/self/fd', stdout)
+        self.assertIn('/proc/self/maps', stdout)
         self.assertIn('/proc/.', stdout)
         self.assertIn('/proc/1', stdout)
+        self.assertIn('/proc/2', stdout)
+        self.assertIn('/proc/3', stdout)
+        self.assertIn('/proc/4', stdout)
         self.assertIn('/proc/self', stdout)
         self.assertIn('/proc/meminfo', stdout)
         self.assertIn('/proc/cpuinfo', stdout)
+        self.assertIn('symlink /proc/self/exec resolves to /proc_common', stdout)
+        self.assertIn('/proc/2/cwd/proc_common.c', stdout)
+        self.assertIn('/lib/libpthread.so', stdout)
+        self.assertIn('stack', stdout)
+        self.assertIn('vendor_id', stdout)
+
+    def test_001_dev(self):
+        stdout, _ = self.run_binary(['dev'])
+        self.assertIn('/dev/.', stdout)
+        self.assertIn('/dev/null', stdout)
+        self.assertIn('/dev/zero', stdout)
+        self.assertIn('/dev/random', stdout)
+        self.assertIn('/dev/urandom', stdout)
+        self.assertIn('/dev/stdin', stdout)
+        self.assertIn('/dev/stdout', stdout)
+        self.assertIn('/dev/stderr', stdout)
+        self.assertIn('Four bytes from /dev/urandom', stdout)
 
     def test_010_path(self):
-        stdout, _ = self.run_binary(['proc-path'])
-
-        # Base /proc path present
+        stdout, _ = self.run_binary(['proc_path'])
         self.assertIn('proc path test success', stdout)
 
     def test_020_cpuinfo(self):
@@ -442,6 +547,14 @@ class TC_80_Socket(RegressionTestCase):
         self.assertIn('pselect() on write event returned 1 file descriptors', stdout)
         self.assertIn('pselect() on read event returned 1 file descriptors', stdout)
 
+    def test_090_pipe(self):
+        stdout, _ = self.run_binary(['pipe'], timeout=60)
+        self.assertIn('read on pipe: Hello from write end of pipe!', stdout)
+
+    def test_095_mkfifo(self):
+        stdout, _ = self.run_binary(['mkfifo'], timeout=60)
+        self.assertIn('read on FIFO: Hello from write end of FIFO!', stdout)
+
     def test_100_socket_unix(self):
         stdout, _ = self.run_binary(['unix'])
         self.assertIn('Data: This is packet 0', stdout)
@@ -479,3 +592,10 @@ class TC_80_Socket(RegressionTestCase):
     def test_310_socket_tcp_ipv6_v6only(self):
         stdout, _ = self.run_binary(['tcp_ipv6_v6only'], timeout=50)
         self.assertIn('test completed successfully', stdout)
+
+@unittest.skipUnless(HAS_SGX,
+    'This test is only meaningful on SGX PAL because only SGX emulates CPUID.')
+class TC_90_CpuidSGX(RegressionTestCase):
+    def test_000_cpuid(self):
+        stdout, _ = self.run_binary(['cpuid'])
+        self.assertIn('CPUID test passed.', stdout)

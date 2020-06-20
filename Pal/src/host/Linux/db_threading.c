@@ -1,18 +1,5 @@
-/* Copyright (C) 2014 Stony Brook University
-   This file is part of Graphene Library OS.
-
-   Graphene Library OS is free software: you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public License
-   as published by the Free Software Foundation, either version 3 of the
-   License, or (at your option) any later version.
-
-   Graphene Library OS is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
+/* Copyright (C) 2014 Stony Brook University */
 
 /*
  * db_threading.c
@@ -35,12 +22,6 @@
 #include <linux/signal.h>
 #include <linux/types.h>
 #include <linux/wait.h>
-
-#if defined(__i386__)
-#include <asm/ldt.h>
-#else
-#include <asm/prctl.h>
-#endif
 
 /* Linux PAL cannot use mmap/unmap to manage thread stacks because this may overlap with
  * pal_control.user_address. Linux PAL also cannot just use malloc/free because DkThreadExit
@@ -100,23 +81,20 @@ out:
  * of the thread. The rest of the TCB is used as the alternative stack for signal
  * handling.
  */
-int pal_thread_init (void * tcbptr)
-{
-    PAL_TCB_LINUX * tcb = tcbptr;
+int pal_thread_init(void* tcbptr) {
+    PAL_TCB_LINUX* tcb = tcbptr;
     int ret;
 
-    ret = INLINE_SYSCALL(arch_prctl, 2, ARCH_SET_GS, tcb);
+    ret = pal_set_tcb(&tcb->common);
     if (IS_ERR(ret))
         return -ERRNO(ret);
 
     if (tcb->alt_stack) {
-        // Align stack to 16 bytes
-        void* alt_stack_top = ALIGN_DOWN_PTR(tcb, 16);
-        assert(alt_stack_top > tcb->alt_stack);
-        stack_t ss;
-        ss.ss_sp    = alt_stack_top;
-        ss.ss_flags = 0;
-        ss.ss_size  = alt_stack_top - tcb->alt_stack;
+        stack_t ss = {
+            .ss_sp    = tcb->alt_stack,
+            .ss_flags = 0,
+            .ss_size  = ALT_STACK_SIZE - sizeof(*tcb),
+        };
 
         ret = INLINE_SYSCALL(sigaltstack, 2, &ss, NULL);
         if (IS_ERR(ret))
@@ -248,7 +226,7 @@ noreturn void _DkThreadExit(int* clear_child_tid) {
         ss.ss_size  = 0;
 
         // Take precautions to unset the TCB and alternative stack first.
-        INLINE_SYSCALL(arch_prctl, 2, ARCH_SET_GS, 0);
+        pal_set_tcb(NULL);
         INLINE_SYSCALL(sigaltstack, 2, &ss, NULL);
     }
 

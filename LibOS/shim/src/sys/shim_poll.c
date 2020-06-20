@@ -1,18 +1,5 @@
-/* Copyright (C) 2014 Stony Brook University
-   This file is part of Graphene Library OS.
-
-   Graphene Library OS is free software: you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public License
-   as published by the Free Software Foundation, either version 3 of the
-   License, or (at your option) any later version.
-
-   Graphene Library OS is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
+/* Copyright (C) 2014 Stony Brook University */
 
 /*
  * shim_poll.c
@@ -57,10 +44,7 @@ typedef long int __fd_mask;
 
 #define POLL_NOTIMEOUT ((uint64_t)-1)
 
-int shim_do_poll(struct pollfd* fds, nfds_t nfds, int timeout_ms) {
-    if (!fds || test_user_memory(fds, sizeof(*fds) * nfds, true))
-        return -EFAULT;
-
+static int _shim_do_poll(struct pollfd* fds, nfds_t nfds, int timeout_ms) {
     if ((uint64_t)nfds > get_rlimit_cur(RLIMIT_NOFILE))
         return -EINVAL;
 
@@ -192,6 +176,13 @@ int shim_do_poll(struct pollfd* fds, nfds_t nfds, int timeout_ms) {
     return nrevents;
 }
 
+int shim_do_poll(struct pollfd* fds, nfds_t nfds, int timeout_ms) {
+    if (!fds || test_user_memory(fds, sizeof(*fds) * nfds, true))
+        return -EFAULT;
+
+    return _shim_do_poll(fds, nfds, timeout_ms);
+}
+
 int shim_do_ppoll(struct pollfd* fds, int nfds, struct timespec* tsp, const __sigset_t* sigmask,
                   size_t sigsetsize) {
     __UNUSED(sigmask);
@@ -211,7 +202,7 @@ int shim_do_select(int nfds, fd_set* readfds, fd_set* writefds, fd_set* errorfds
 
     if (!nfds) {
         if (!tsv)
-            return -EINVAL;
+            return shim_do_pause();
 
         /* special case of select(0, ..., tsv) used for sleep */
         struct __kernel_timespec tsp;
@@ -264,7 +255,7 @@ int shim_do_select(int nfds, fd_set* readfds, fd_set* writefds, fd_set* errorfds
     unlock(&map->lock);
 
     uint64_t timeout_ms = tsv ? tsv->tv_sec * 1000ULL + tsv->tv_usec / 1000 : POLL_NOTIMEOUT;
-    int ret = shim_do_poll(fds_poll, nfds_poll, timeout_ms);
+    int ret = _shim_do_poll(fds_poll, nfds_poll, timeout_ms);
 
     if (ret < 0) {
         free(fds_poll);

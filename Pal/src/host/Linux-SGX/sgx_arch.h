@@ -1,18 +1,5 @@
-/* Copyright (C) 2014 Stony Brook University
-   This file is part of Graphene Library OS.
-
-   Graphene Library OS is free software: you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public License
-   as published by the Free Software Foundation, either version 3 of the
-   License, or (at your option) any later version.
-
-   Graphene Library OS is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
+/* Copyright (C) 2014 Stony Brook University */
 
 #ifndef SGX_ARCH_H
 #define SGX_ARCH_H
@@ -21,6 +8,7 @@
 
 #ifndef __ASSEMBLER__
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "assert.h"
@@ -294,18 +282,22 @@ typedef struct _sgx_report_data_t {
 #define __sgx_mem_aligned __attribute__((aligned(512)))
 
 typedef struct _report_body_t {
-    sgx_cpu_svn_t     cpu_svn;
-    sgx_misc_select_t misc_select;
-    uint8_t           reserved1[28];
-    sgx_attributes_t  attributes;
-    sgx_measurement_t mr_enclave;
-    uint8_t           reserved2[32];
-    sgx_measurement_t mr_signer;
-    uint8_t           reserved3[96];
-    sgx_prod_id_t     isv_prod_id;
-    sgx_isv_svn_t     isv_svn;
-    uint8_t           reserved4[60];
-    sgx_report_data_t report_data;
+    sgx_cpu_svn_t        cpu_svn;
+    sgx_misc_select_t    misc_select;
+    uint8_t              reserved1[12];
+    sgx_isvext_prod_id_t isv_ext_prod_id;
+    sgx_attributes_t     attributes;
+    sgx_measurement_t    mr_enclave;
+    uint8_t              reserved2[32];
+    sgx_measurement_t    mr_signer;
+    uint8_t              reserved3[32];
+    sgx_config_id_t      config_id;
+    sgx_prod_id_t        isv_prod_id;
+    sgx_isv_svn_t        isv_svn;
+    sgx_config_svn_t     config_svn;
+    uint8_t              reserved4[42];
+    sgx_isvfamily_id_t   isv_family_id;
+    sgx_report_data_t    report_data;
 } sgx_report_body_t;
 
 typedef struct _report_t {

@@ -1,18 +1,5 @@
-/* Copyright (C) 2014 Stony Brook University
-   This file is part of Graphene Library OS.
-
-   Graphene Library OS is free software: you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public License
-   as published by the Free Software Foundation, either version 3 of the
-   License, or (at your option) any later version.
-
-   Graphene Library OS is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
+/* Copyright (C) 2014 Stony Brook University */
 
 /*
  * shim_malloc.c
@@ -29,7 +16,6 @@
 #include <pal_debug.h>
 #include <shim_checkpoint.h>
 #include <shim_internal.h>
-#include <shim_profile.h>
 #include <shim_utils.h>
 #include <shim_vma.h>
 
@@ -50,26 +36,17 @@ static struct shim_lock slab_mgr_lock;
 
 static SLAB_MGR slab_mgr = NULL;
 
-DEFINE_PROFILE_CATEGORY(memory, );
-
 /* Returns NULL on failure */
 void* __system_malloc(size_t size) {
     size_t alloc_size = ALLOC_ALIGN_UP(size);
     void* addr;
     void* ret_addr;
-    int flags = MAP_PRIVATE | MAP_ANONYMOUS | VMA_INTERNAL;
 
-    /*
-     * If vmas are initialized, we need to request a free address range
-     * using bkeep_unmapped_any(). The current mmap code uses this function
-     * to synchronize all address allocation, via a "publication"
-     * pattern. It is not safe to just call DkVirtualMemoryAlloc directly
-     * without reserving the vma region first.
-     */
-    addr = bkeep_unmapped_any(alloc_size, PROT_READ | PROT_WRITE, flags, 0, "slab");
-
-    if (!addr)
+    int ret = bkeep_mmap_any(alloc_size, PROT_READ | PROT_WRITE,
+                             MAP_PRIVATE | MAP_ANONYMOUS | VMA_INTERNAL, NULL, 0, "slab", &addr);
+    if (ret < 0) {
         return NULL;
+    }
 
     do {
         ret_addr = DkVirtualMemoryAlloc(addr, alloc_size, 0, PAL_PROT_WRITE | PAL_PROT_READ);
@@ -77,13 +54,17 @@ void* __system_malloc(size_t size) {
         if (!ret_addr) {
             /* If the allocation is interrupted by signal, try to handle the
              * signal and then retry the allocation. */
-            if (PAL_NATIVE_ERRNO == PAL_ERROR_INTERRUPTED) {
-                handle_signal();
+            if (PAL_NATIVE_ERRNO() == PAL_ERROR_INTERRUPTED) {
+                handle_signals();
                 continue;
             }
 
-            debug("failed to allocate memory (%ld)\n", -PAL_ERRNO);
-            bkeep_munmap(addr, alloc_size, flags);
+            debug("failed to allocate memory (%ld)\n", -PAL_ERRNO());
+            void* tmp_vma = NULL;
+            if (bkeep_munmap(addr, alloc_size, /*is_internal=*/true, &tmp_vma) < 0) {
+                BUG();
+            }
+            bkeep_remove_tmp_vma(tmp_vma);
             return NULL;
         }
     } while (!ret_addr);
@@ -92,10 +73,12 @@ void* __system_malloc(size_t size) {
 }
 
 void __system_free(void* addr, size_t size) {
-    DkVirtualMemoryFree(addr, ALLOC_ALIGN_UP(size));
-
-    if (bkeep_munmap(addr, ALLOC_ALIGN_UP(size), VMA_INTERNAL) < 0)
+    void* tmp_vma = NULL;
+    if (bkeep_munmap(addr, ALLOC_ALIGN_UP(size), /*is_internal=*/true, &tmp_vma) < 0) {
         BUG();
+    }
+    DkVirtualMemoryFree(addr, ALLOC_ALIGN_UP(size));
+    bkeep_remove_tmp_vma(tmp_vma);
 }
 
 int init_slab(void) {
@@ -111,69 +94,12 @@ int init_slab(void) {
 
 EXTERN_ALIAS(init_slab);
 
-int reinit_slab(void) {
-    if (slab_mgr) {
-        destroy_slab_mgr(slab_mgr);
-        slab_mgr = NULL;
-    }
-    return 0;
-}
-
-DEFINE_PROFILE_OCCURENCE(malloc_0, memory);
-DEFINE_PROFILE_OCCURENCE(malloc_1, memory);
-DEFINE_PROFILE_OCCURENCE(malloc_2, memory);
-DEFINE_PROFILE_OCCURENCE(malloc_3, memory);
-DEFINE_PROFILE_OCCURENCE(malloc_4, memory);
-DEFINE_PROFILE_OCCURENCE(malloc_5, memory);
-DEFINE_PROFILE_OCCURENCE(malloc_6, memory);
-DEFINE_PROFILE_OCCURENCE(malloc_7, memory);
-DEFINE_PROFILE_OCCURENCE(malloc_big, memory);
-
 #if defined(SLAB_DEBUG_PRINT) || defined(SLABD_DEBUG_TRACE)
 void* __malloc_debug(size_t size, const char* file, int line)
 #else
 void* malloc(size_t size)
 #endif
 {
-#ifdef PROFILE
-    int level = -1;
-
-    for (size_t i = 0; i < SLAB_LEVEL; i++)
-        if (size < slab_levels[i]) {
-            level = i;
-            break;
-        }
-    switch (level) {
-        case 0:
-            INC_PROFILE_OCCURENCE(malloc_0);
-            break;
-        case 1:
-            INC_PROFILE_OCCURENCE(malloc_1);
-            break;
-        case 2:
-            INC_PROFILE_OCCURENCE(malloc_2);
-            break;
-        case 3:
-            INC_PROFILE_OCCURENCE(malloc_3);
-            break;
-        case 4:
-            INC_PROFILE_OCCURENCE(malloc_4);
-            break;
-        case 5:
-            INC_PROFILE_OCCURENCE(malloc_5);
-            break;
-        case 6:
-            INC_PROFILE_OCCURENCE(malloc_6);
-            break;
-        case 7:
-            INC_PROFILE_OCCURENCE(malloc_7);
-            break;
-        case -1:
-            INC_PROFILE_OCCURENCE(malloc_big);
-            break;
-    }
-#endif
-
 #ifdef SLAB_DEBUG_TRACE
     void* mem = slab_alloc_debug(slab_mgr, size, file, line);
 #else
@@ -260,17 +186,6 @@ void* malloc_copy(const void* mem, size_t size)
 EXTERN_ALIAS(malloc_copy);
 #endif
 
-DEFINE_PROFILE_OCCURENCE(free_0, memory);
-DEFINE_PROFILE_OCCURENCE(free_1, memory);
-DEFINE_PROFILE_OCCURENCE(free_2, memory);
-DEFINE_PROFILE_OCCURENCE(free_3, memory);
-DEFINE_PROFILE_OCCURENCE(free_4, memory);
-DEFINE_PROFILE_OCCURENCE(free_5, memory);
-DEFINE_PROFILE_OCCURENCE(free_6, memory);
-DEFINE_PROFILE_OCCURENCE(free_7, memory);
-DEFINE_PROFILE_OCCURENCE(free_big, memory);
-DEFINE_PROFILE_OCCURENCE(free_migrated, memory);
-
 #if defined(SLAB_DEBUG_PRINT) || defined(SLABD_DEBUG_TRACE)
 void __free_debug(void* mem, const char* file, int line)
 #else
@@ -280,43 +195,8 @@ void free(void* mem)
     if (!mem)
         return;
     if (memory_migrated(mem)) {
-        INC_PROFILE_OCCURENCE(free_migrated);
         return;
     }
-
-#ifdef PROFILE
-    int level = RAW_TO_LEVEL(mem);
-    switch (level) {
-        case 0:
-            INC_PROFILE_OCCURENCE(free_0);
-            break;
-        case 1:
-            INC_PROFILE_OCCURENCE(free_1);
-            break;
-        case 2:
-            INC_PROFILE_OCCURENCE(free_2);
-            break;
-        case 3:
-            INC_PROFILE_OCCURENCE(free_3);
-            break;
-        case 4:
-            INC_PROFILE_OCCURENCE(free_4);
-            break;
-        case 5:
-            INC_PROFILE_OCCURENCE(free_5);
-            break;
-        case 6:
-            INC_PROFILE_OCCURENCE(free_6);
-            break;
-        case 7:
-            INC_PROFILE_OCCURENCE(free_7);
-            break;
-        case -1:
-        case 255:
-            INC_PROFILE_OCCURENCE(free_big);
-            break;
-    }
-#endif
 
 #ifdef SLAB_DEBUG_PRINT
     debug("free(%p) (%s:%d)\n", mem, file, line);

@@ -14,16 +14,22 @@ RUN apt-get update && env DEBIAN_FRONTEND=noninteractive apt-get install -y \
     git \
     libapr1-dev \
     libaprutil1-dev \
+    libcurl4-openssl-dev \
     libelf-dev \
     libexpat1 \
     libexpat1-dev \
     libnss-mdns \
+    libnuma1 \
     libomp-dev \
     libpcre2-dev \
     libpcre3-dev \
     libprotobuf-c-dev \
     libssl-dev \
+    libxfixes3 \
+    libxi6 \
     libxml2-dev \
+    libxrender1 \
+    libxxf86vm1 \
     linux-headers-4.15.0-20-generic \
     net-tools \
     protobuf-c-compiler \
@@ -44,7 +50,7 @@ RUN apt-get update && env DEBIAN_FRONTEND=noninteractive apt-get install -y \
     zlib1g \
     zlib1g-dev
 
-RUN pip3 install 'Sphinx>=1.8' sphinx_rtd_theme recommonmark
+RUN pip3 install 'Sphinx==1.8' sphinx_rtd_theme recommonmark
 
 # Add the user UID:1001, GID:1001, home at /leeroy
 RUN groupadd -r leeroy -g 1001 && useradd -u 1001 -r -g leeroy -m -d /leeroy -c "Leeroy Jenkins" leeroy && \

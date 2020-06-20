@@ -20,8 +20,15 @@ OBJ_DIR = $(HOST_DIR)/.obj
 
 include host/$(PAL_HOST)/Makefile.am
 
-CFLAGS += -I. -I../include -I../include/pal -I../include/$(HOST_DIR) \
-    -I$(HOST_DIR) -I../include/lib
+CFLAGS += \
+	-I. \
+	-I$(HOST_DIR) \
+	-I../include \
+	-I../include/pal \
+	-I../include/$(HOST_DIR) \
+	-I../include/arch/$(ARCH) \
+	-I../include/arch/$(ARCH)/$(PAL_HOST) \
+	-I../include/lib
 
 PAL_HOST_MACRO = $(shell echo $(PAL_HOST) | tr '[:lower:]' '[:upper:]' | tr '-' '_')
 
@@ -36,8 +43,21 @@ files_to_build = $(pal_lib) $(pal_lib_post) $(pal_static) \
 defs	= -DIN_PAL -DHOST_TYPE="$(PAL_HOST)" -D$(PAL_HOST_MACRO) -DPAL_DIR=$(PAL_DIR) \
 	  -DRUNTIME_DIR=$(RUNTIME_DIR)
 CFLAGS += $(defs)
-objs	= $(addprefix db_,streams memory threading mutex events process \
-	    object main misc exception rtld) slab printf pal_error
+objs = \
+	db_events.o \
+	db_exception.o \
+	db_main.o \
+	db_memory.o \
+	db_misc.o \
+	db_mutex.o \
+	db_object.o \
+	db_process.o \
+	db_rtld.o \
+	db_streams.o \
+	db_threading.o \
+	pal_error.o \
+	printf.o \
+	slab.o
 
 graphene_lib = $(LIB_DIR)/graphene-lib.a
 host_lib = $(HOST_DIR)/libpal-$(PAL_HOST).a
@@ -91,7 +111,7 @@ $(runtime_loader): $(pal_loader)
 endif
 
 ifneq ($(pal_lib),)
-$(pal_lib): $(addprefix $(OBJ_DIR)/,$(addsuffix .o,$(objs))) \
+$(pal_lib): $(addprefix $(OBJ_DIR)/,$(objs)) \
 	    $(host_lib) $(graphene_lib) $(pal_lib_deps)
 	$(call cmd,ld_so_o)
 
@@ -109,7 +129,7 @@ $(pal_lib_post): $(pal_lib)
 	@$(MAKE) -C $(HOST_DIR) $@
 endif
 
-$(pal_static): $(addprefix $(OBJ_DIR)/,$(addsuffix .o,$(objs))) \
+$(pal_static): $(addprefix $(OBJ_DIR)/,$(objs)) \
 	       $(host_lib) $(graphene_lib)
 	$(call cmd,ar_a_o)
 
@@ -127,7 +147,7 @@ $(OBJ_DIR)/%.s: %.c
 
 ifeq ($(filter %clean,$(MAKECMDGOALS)),)
 include $(wildcard *.d)
--include $(patsubst %,$(OBJ_DIR)/%.d,$(objs))
+-include $(patsubst %.o,$(OBJ_DIR)/%.d,$(objs))
 endif
 
 clean_targets = clean distclean
@@ -137,7 +157,7 @@ $(clean_targets): clean_
 	@[ ! -d $(HOST_DIR) ] || $(MAKE) -C $(HOST_DIR) $@
 
 clean_:
-	rm -rf $(LIB_DIR) $(OBJ_DIR) $(files_to_build) *.d
+	$(RM) -r $(LIB_DIR) $(OBJ_DIR) $(files_to_build) *.d
 
 .PHONY: test
 test:

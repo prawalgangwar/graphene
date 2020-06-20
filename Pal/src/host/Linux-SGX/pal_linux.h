@@ -1,23 +1,11 @@
-/* Copyright (C) 2014 Stony Brook University
-   This file is part of Graphene Library OS.
-
-   Graphene Library OS is free software: you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public License
-   as published by the Free Software Foundation, either version 3 of the
-   License, or (at your option) any later version.
-
-   Graphene Library OS is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
+/* Copyright (C) 2014 Stony Brook University */
 
 #ifndef PAL_LINUX_H
 #define PAL_LINUX_H
 
 #include "api.h"
+#include "assert.h"
 #include "pal.h"
 #include "pal_crypto.h"
 #include "pal_defs.h"
@@ -33,9 +21,7 @@
 
 #include <linux/mman.h>
 
-#ifdef __x86_64__
-# include "sysdep-x86_64.h"
-#endif
+#include "sysdep-arch.h"
 
 #define ENCLAVE_PAL_FILENAME RUNTIME_FILE("libpal-Linux-SGX.so")
 
@@ -63,20 +49,7 @@ extern struct pal_linux_state {
 
 #include <asm/mman.h>
 
-#define PRESET_PAGESIZE (1 << 12)
-
-#define DEFAULT_BACKLOG     2048
-
-static inline int HOST_FLAGS (int alloc_type, int prot)
-{
-    return ((alloc_type & PAL_ALLOC_RESERVE) ? MAP_NORESERVE|MAP_UNINITIALIZED : 0) |
-           ((prot & PAL_PROT_WRITECOPY) ? MAP_PRIVATE : MAP_SHARED);
-}
-
-static inline int HOST_PROT (int prot)
-{
-    return prot & (PAL_PROT_READ|PAL_PROT_WRITE|PAL_PROT_EXEC);
-}
+#define DEFAULT_BACKLOG 2048
 
 #define ACCESS_R    4
 #define ACCESS_W    2
@@ -85,6 +58,8 @@ static inline int HOST_PROT (int prot)
 struct stat;
 bool stataccess (struct stat * stats, int acc);
 
+int init_child_process(PAL_HANDLE* parent);
+
 #ifdef IN_ENCLAVE
 
 struct pal_sec;
@@ -92,6 +67,9 @@ void pal_linux_main(char * uptr_args, size_t args_size,
                     char * uptr_env, size_t env_size,
                     struct pal_sec * uptr_sec_info);
 void pal_start_thread (void);
+
+struct link_map;
+void setup_pal_map(struct link_map* map);
 
 /* Locking and unlocking of Mutexes */
 int __DkMutexCreate (struct mutex_handle * mut);
@@ -124,7 +102,12 @@ void save_xregs(PAL_XREGS_STATE* xsave_area);
 void restore_xregs(const PAL_XREGS_STATE* xsave_area);
 noreturn void _restore_sgx_context(sgx_cpu_context_t* uc, PAL_XREGS_STATE* xsave_area);
 
+void _DkExceptionHandler(unsigned int exit_info, sgx_cpu_context_t* uc, PAL_XREGS_STATE* xregs_state);
+void _DkHandleExternalEvent(PAL_NUM event, sgx_cpu_context_t* uc, PAL_XREGS_STATE* xregs_state);
+
+
 int init_trusted_files (void);
+void init_cpuid(void);
 
 /* Function: load_trusted_file
  * checks if the file to be opened is trusted or allowed,
@@ -138,8 +121,8 @@ int init_trusted_files (void);
  * return:  0 succeed
  */
 
-int load_trusted_file
-    (PAL_HANDLE file, sgx_stub_t ** stubptr, uint64_t * sizeptr, int create);
+int load_trusted_file(PAL_HANDLE file, sgx_stub_t** stubptr, uint64_t* sizeptr, int create,
+                      void** umem);
 
 enum {
     FILE_CHECK_POLICY_STRICT = 0,
@@ -158,10 +141,19 @@ int copy_and_verify_trusted_file (const char * path, const void * umem,
 int init_trusted_children (void);
 int register_trusted_child (const char * uri, const char * mr_enclave_str);
 
+int init_enclave(void);
+int init_enclave_key(void);
+
+void init_untrusted_slab_mgr(void);
+
 /* exchange and establish a 256-bit session key */
 int _DkStreamKeyExchange(PAL_HANDLE stream, PAL_SESSION_KEY* key);
 
 typedef uint8_t sgx_sign_data_t[48];
+
+/* master key for all enclaves of one application, populated by the first enclave and inherited by
+ * all other enclaves (children, their children, etc.); used as master key in pipes' encryption */
+extern PAL_SESSION_KEY g_master_key;
 
 /* enclave state used for generating report */
 extern struct pal_enclave_state {
@@ -169,12 +161,27 @@ extern struct pal_enclave_state {
     uint64_t        enclave_id;         // Unique identifier for authentication
     sgx_sign_data_t enclave_data;       // Reserved for signing other data
 } __attribute__((packed)) pal_enclave_state;
+static_assert(sizeof(pal_enclave_state) == sizeof(sgx_report_data_t), "incorrect struct size");
 
 /*
  * sgx_verify_report: verify a CPU-signed report from another local enclave
  * @report: the buffer storing the report to verify
  */
 int sgx_verify_report(sgx_report_t* report);
+
+
+/*!
+ * \brief Obtain a CPU-signed report for local attestation.
+ *
+ * Caller must align all parameters to 512 bytes (cf. `__sgx_mem_aligned`).
+ *
+ * \param[in]  target_info  Information on the target enclave.
+ * \param[in]  data         User-specified data to be included in the report.
+ * \param[out] report       Output buffer to store the report.
+ * \return                  0 on success, negative error code otherwise.
+ */
+int sgx_get_report(const sgx_target_info_t* target_info, const sgx_report_data_t* data,
+                   sgx_report_t* report);
 
 typedef int (*check_mr_enclave_t)(PAL_HANDLE, sgx_measurement_t*, struct pal_enclave_state*);
 
@@ -192,10 +199,12 @@ int _DkStreamReportRespond(PAL_HANDLE stream, sgx_sign_data_t* data,
                            check_mr_enclave_t check_mr_enclave);
 
 int _DkStreamSecureInit(PAL_HANDLE stream, bool is_server, PAL_SESSION_KEY* session_key,
-                        LIB_SSL_CONTEXT** out_ssl_ctx);
+                        LIB_SSL_CONTEXT** out_ssl_ctx, const uint8_t* buf_load_ssl_ctx,
+                        size_t buf_size);
 int _DkStreamSecureFree(LIB_SSL_CONTEXT* ssl_ctx);
 int _DkStreamSecureRead(LIB_SSL_CONTEXT* ssl_ctx, uint8_t* buf, size_t len);
 int _DkStreamSecureWrite(LIB_SSL_CONTEXT* ssl_ctx, const uint8_t* buf, size_t len);
+int _DkStreamSecureSave(LIB_SSL_CONTEXT* ssl_ctx, const uint8_t** obuf, size_t* olen);
 
 #include "sgx_arch.h"
 
@@ -211,7 +220,7 @@ extern struct pal_enclave_config {
 
 #else
 
-int sgx_create_process(const char* uri, int nargs, const char** args, int* stream_fd, int* cargo_fd);
+int sgx_create_process(const char* uri, int nargs, const char** args, int* stream_fd);
 
 #ifdef DEBUG
 # ifndef SIGCHLD

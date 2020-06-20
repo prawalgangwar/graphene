@@ -11,15 +11,12 @@ Documentation is generally written as `reStructuredText`_ files which are placed
 in ``Documentation/`` directory. See `Sphinx' reST primer`_ for short
 introduction into syntax.
 
-For code written in |nbsp| C, we use `Doxygen`_ and `Breathe`_, which is
-a |nbsp| Sphinx' plugin for including Doxygen documentation. Documentation of
-C |nbsp| language API should be written as Doxygen comments (see `Doxygen
-manual`_) and then included in one of the ``.rst`` files (with appropriate
-description) using one of the `Breathe directives`_, like
-``.. doxygenfunction::`` or ``.. doxygenstruct::``.
-
-:ref:`Old Wiki <old-wiki>` is imported as it was, in Markdown, but new
-documentation should be written in reST.
+For code written in |~| C, we use `Doxygen`_ and `Breathe`_, which is
+a |~| Sphinx' plugin for including Doxygen documentation. Documentation of
+C |~| language API should be written as Doxygen comments (see `Doxygen manual`_)
+and then included in one of the ``.rst`` files (with appropriate description)
+using one of the `Breathe directives`_, like ``.. doxygenfunction::`` or ``..
+doxygenstruct::``.
 
 The documentation should be written with ``html`` builder of Sphinx in mind. The
 :file:`manpages/` subdirectory also targets ``manpage`` builder. Other builders
@@ -28,13 +25,13 @@ not published.
 
 .. note::
 
-   A |nbsp| note about terminology:
+   A |~| note about terminology:
 
    ``html``, ``latex`` and ``manpage``, and also others, are Sphinx "builders":
-   http://www.sphinx-doc.org/en/master/man/sphinx-build.html#cmdoption-sphinx-build-b.
+   https://www.sphinx-doc.org/en/master/man/sphinx-build.html#cmdoption-sphinx-build-b.
    Sphinx can output many different formats, some of them have overlapping usage
    (both ``html`` and ``latex`` usually output full handbook, the difference is
-   screen vs print), some are specialised (``manpage`` processes only selected
+   screen vs print), some are specialized (``manpage`` processes only selected
    documents for man; those documents may or may not be also used by other
    builders).
 
@@ -61,20 +58,20 @@ Preferred reST style
 (This is adapted from `Python's style guide`_).
 
 - Use 3-space tab in ``.rst`` files to align the indentation with reST explicit
-  markup, which begins with two dots and a |nbsp| space.
+  markup, which begins with two dots and a |~| space.
 
 - Wrap the paragraphs at 80th character. But don't wrap verbatim text like logs
-  and use applicable style when wrapping code examples (see ``CODESTYLE.md`` in
-  the repository).
+  and use applicable style when wrapping code examples (see
+  :doc:`devel/coding-style`).
 
 - For headers, use Python convention for header hierarchy:
 
-  1. ``#`` with overline,
-  2. ``*`` with overline,
-  3. ``=``,
-  4. ``-``,
-  5. ``^``,
-  6. ``"``.
+  #. ``#`` with overline,
+  #. ``*`` with overline,
+  #. ``=``,
+  #. ``-``,
+  #. ``^``,
+  #. ``"``.
 
   Example::
 
@@ -109,24 +106,24 @@ Preferred reST style
      For Emacs users:
         Read more at https://docutils.sourceforge.io/docs/user/emacs.html.
 
-- Use ``|nbsp|`` to insert non-breaking space. This should be added after
+- Use ``|~|`` to insert non-breaking space. This should be added after
   one-letter words and where otherwise appropriate::
 
-      This is a |nbsp| function.
+      This is a |~| function.
 
   This substitution is added to all documents processed by Sphinx. For files
   processed also by other software (like ``README.rst``, which is both rendered
-  by GitHub and included in ``index.rst``), use ``|_|`` after adding this
+  by GitHub and included in ``index.rst``), use ``|nbsp|`` after adding this
   substitution yourself::
 
-      .. |_| unicode:: 0xa0
+      .. |nbsp| unicode:: 0xa0
          :trim:
 
-      This is a |_| README.
+      This is a |nbsp| README.
 
 Documentation of the code should be organized into files by logical concepts,
 as they fit into programmer's mind. Ideally, this should match the source files,
-if those files were organised correctly in the first place, but the reality may
+if those files were organized correctly in the first place, but the reality may
 be different. In case of doubt, place them as they fit the narrative of the
 document, not as they are placed in the source files.
 
@@ -137,7 +134,7 @@ included in TOC in the main document and also in sidebar on RTD.
 Preferred Doxygen style
 -----------------------
 
-1. Prefer Qt-style ``/*!`` and ``\param``:
+#. Prefer Qt-style ``/*!`` and ``\param``:
 
    .. code-block:: c
 
@@ -156,16 +153,30 @@ Preferred Doxygen style
 
    ::
 
-      There is a |nbsp| very special function :c:func:`foo`:
+      There is a |~| very special function :c:func:`foo`:
 
       .. doxygenfunction:: foo
 
       It's an example function, but is documented!
 
-2. In reST, do not use ``autodoxygen`` directives, and especially do not use
+#. In reST, do not use ``autodoxygen`` directives, and especially do not use
    ``.. doxygenfile::``, because documentation should be written as prose, not
-   a |nbsp| coredump. Write an explanation, how the things go together and place
+   a |~| coredump. Write an explanation, how the things go together and place
    the ``.. doxygenfunction::`` directives where aproppriate.
+
+#. You can use ``\rst`` and ``\endrst`` to write reST in Doxygen comments:
+
+   .. code-block:: c
+
+      /*!
+       * \brief An example function
+       *
+       * \rst
+       * .. note::
+       *
+       *    This works!
+       * \endrst
+       */
 
 Further reading
 ---------------

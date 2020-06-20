@@ -3,20 +3,24 @@
 #include "pal_debug.h"
 
 #define NUM_TO_HEX(num) ((num) >= 10 ? 'a' + ((num) - 10) : '0' + (num))
+#define BUF_SIZE 40
 
-static __attribute__((noinline)) void print_hex(char* fmt, const void* data, int len) {
-    char* buf    = __alloca(len * 2 + 1);
-    buf[len * 2] = '\0';
+char buffer1[BUF_SIZE];
+char buffer2[BUF_SIZE];
+char buffer3[BUF_SIZE];
+char hex_buf[BUF_SIZE * 2 + 1];
+
+static void print_hex(char* fmt, const void* data, int len) {
+    hex_buf[len * 2] = '\0';
     for (int i = 0; i < len; i++) {
         unsigned char b = ((unsigned char*)data)[i];
-        buf[i * 2]      = NUM_TO_HEX(b >> 4);
-        buf[i * 2 + 1]  = NUM_TO_HEX(b & 0xf);
+        hex_buf[i * 2]      = NUM_TO_HEX(b >> 4);
+        hex_buf[i * 2 + 1]  = NUM_TO_HEX(b & 0xf);
     }
-    pal_printf(fmt, buf);
+    pal_printf(fmt, hex_buf);
 }
 
 int main(int argc, char** argv, char** envp) {
-    char buffer1[40], buffer2[40], buffer3[40];
     int ret;
 
     /* test regular file opening */
@@ -54,7 +58,7 @@ int main(int argc, char** argv, char** envp) {
 
         /* test file map */
 
-        void* mem1 = (void*)DkStreamMap(file1, NULL, PAL_PROT_READ | PAL_PROT_WRITECOPY, 0, 4096);
+        void* mem1 = (void*)DkStreamMap(file1, NULL, PAL_PROT_READ | PAL_PROT_WRITECOPY, 0, PAGE_SIZE);
         if (mem1) {
             memcpy(buffer1, mem1, 40);
             print_hex("Map Test 1 (0th - 40th): %s\n", buffer1, 40);
@@ -62,14 +66,14 @@ int main(int argc, char** argv, char** envp) {
             memcpy(buffer2, mem1 + 200, 40);
             print_hex("Map Test 2 (200th - 240th): %s\n", buffer2, 40);
 
-            DkStreamUnmap(mem1, 4096);
+            DkStreamUnmap(mem1, PAGE_SIZE);
         } else {
             pal_printf("Map Test 1 & 2: Failed to map buffer\n");
         }
 
         /* DEP 11/24/17: For SGX writecopy exercises a different path in the PAL */
         void* mem2 =
-            (void*)DkStreamMap(file1, NULL, PAL_PROT_READ | PAL_PROT_WRITECOPY, 4096, 4096);
+            (void*)DkStreamMap(file1, NULL, PAL_PROT_READ | PAL_PROT_WRITECOPY, 4096, PAGE_SIZE);
         if (mem2) {
             memcpy(buffer3, mem2, 40);
             print_hex("Map Test 3 (4096th - 4136th): %s\n", buffer3, 40);
@@ -77,7 +81,7 @@ int main(int argc, char** argv, char** envp) {
             memcpy(buffer3, mem2 + 200, 40);
             print_hex("Map Test 4 (4296th - 4336th): %s\n", buffer3, 40);
 
-            DkStreamUnmap(mem2, 4096);
+            DkStreamUnmap(mem2, PAGE_SIZE);
         }
 
         DkObjectClose(file1);
@@ -103,13 +107,13 @@ int main(int argc, char** argv, char** envp) {
 
     PAL_HANDLE file4 =
         DkStreamOpen("file:file_nonexist.tmp", PAL_ACCESS_RDWR,
-                     PAL_SHARE_OWNER_R | PAL_SHARE_OWNER_W, PAL_CREATE_TRY | PAL_CREATE_ALWAYS, 0);
+                     PAL_SHARE_OWNER_R | PAL_SHARE_OWNER_W, PAL_CREATE_ALWAYS, 0);
     if (file4)
         pal_printf("File Creation Test 1 OK\n");
 
     PAL_HANDLE file5 =
         DkStreamOpen("file:file_nonexist.tmp", PAL_ACCESS_RDWR,
-                     PAL_SHARE_OWNER_R | PAL_SHARE_OWNER_W, PAL_CREATE_TRY | PAL_CREATE_ALWAYS, 0);
+                     PAL_SHARE_OWNER_R | PAL_SHARE_OWNER_W, PAL_CREATE_ALWAYS, 0);
     if (file5) {
         DkObjectClose(file5);
     } else {
@@ -125,7 +129,7 @@ int main(int argc, char** argv, char** envp) {
 
     file6 =
         DkStreamOpen("file:file_nonexist_disallowed.tmp", PAL_ACCESS_RDWR,
-                     PAL_SHARE_OWNER_R | PAL_SHARE_OWNER_W, PAL_CREATE_TRY | PAL_CREATE_ALWAYS, 0);
+                     PAL_SHARE_OWNER_R | PAL_SHARE_OWNER_W, PAL_CREATE_ALWAYS, 0);
     if (!file6) {
         pal_printf("File Creation Test 4 OK\n");
     } else {

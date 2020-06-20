@@ -1,18 +1,5 @@
-/* Copyright (C) 2014 Stony Brook University
-   This file is part of Graphene Library OS.
-
-   Graphene Library OS is free software: you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public License
-   as published by the Free Software Foundation, either version 3 of the
-   License, or (at your option) any later version.
-
-   Graphene Library OS is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
+/* Copyright (C) 2014 Stony Brook University */
 
 /*
  * shim_clone.c
@@ -21,22 +8,22 @@
  * implemented yet.)
  */
 
-#include <shim_types.h>
-#include <shim_internal.h>
-#include <shim_table.h>
-#include <shim_thread.h>
-#include <shim_utils.h>
-#include <shim_checkpoint.h>
-#include <shim_profile.h>
+#include "shim_context.h"
+#include "shim_fork.h"
+#include "shim_types.h"
+#include "shim_internal.h"
+#include "shim_table.h"
+#include "shim_thread.h"
+#include "shim_utils.h"
+#include "shim_checkpoint.h"
 
-#include <pal.h>
-#include <pal_error.h>
+#include "pal.h"
+#include "pal_error.h"
 
 #include <errno.h>
 #include <sys/syscall.h>
 #include <sys/mman.h>
 #include <linux/sched.h>
-#include <asm/prctl.h>
 
 void __attribute__((weak)) syscall_wrapper_after_syscalldb(void)
 {
@@ -45,26 +32,6 @@ void __attribute__((weak)) syscall_wrapper_after_syscalldb(void)
      * syscalldb.S is excluded for libsysdb_debug.so so it fails to link
      * due to missing syscall_wrapper_after_syscalldb.
      */
-}
-
-/*
- * See syscall_wrapper @ syscalldb.S and illegal_upcall() @ shim_signal.c
- * for details.
- * child thread can _not_ use parent stack. So return right after syscall
- * instruction as if syscall_wrapper is executed.
- */
-static void fixup_child_context(struct shim_regs * regs)
-{
-    if (regs->rip == (unsigned long)&syscall_wrapper_after_syscalldb) {
-        /*
-         * we don't need to emulate stack pointer change because %rsp is
-         * initialized to new child user stack passed to clone() system call.
-         * See the caller of fixup_child_context().
-         */
-        /* regs->rsp += RED_ZONE_SIZE; */
-        regs->rflags = regs->r11;
-        regs->rip = regs->rcx;
-    }
 }
 
 /* from **sysdeps/unix/sysv/linux/x86_64/clone.S:
@@ -141,10 +108,15 @@ static int clone_implementation_wrapper(struct shim_clone_args * arg)
 
     void * stack = arg->stack;
 
-    struct shim_vma_val vma;
-    lookup_vma(ALLOC_ALIGN_DOWN_PTR(stack), &vma);
-    my_thread->stack_top = vma.addr + vma.length;
-    my_thread->stack_red = my_thread->stack = vma.addr;
+    struct shim_vma_info vma_info;
+    if (lookup_vma(ALLOC_ALIGN_DOWN_PTR(stack), &vma_info) < 0) {
+        return -EFAULT;
+    }
+    my_thread->stack_top = (char*)vma_info.addr + vma_info.length;
+    my_thread->stack_red = my_thread->stack = vma_info.addr;
+    if (vma_info.file) {
+        put_handle(vma_info.file);
+    }
 
     /* until now we're not ready to be exposed to other thread */
     add_thread(my_thread);
@@ -163,17 +135,13 @@ static int clone_implementation_wrapper(struct shim_clone_args * arg)
 
     tcb->context.regs = &regs;
     fixup_child_context(tcb->context.regs);
-    tcb->context.regs->rsp = (unsigned long)stack;
+    shim_context_set_sp(&tcb->context, (unsigned long)stack);
 
     put_thread(my_thread);
 
     restore_context(&tcb->context);
     return 0;
 }
-
-int migrate_fork (struct shim_cp_store * cpstore,
-                  struct shim_thread * thread,
-                  struct shim_process * process, va_list ap);
 
 /*  long int __arg0 - flags
  *  long int __arg1 - 16 bytes ( 2 words ) offset into the child stack allocated
@@ -184,17 +152,60 @@ int shim_do_clone (int flags, void * user_stack_addr, int * parent_tidptr,
 {
     //The Clone Implementation in glibc has setup the child's stack
     //with the function pointer and the argument to the funciton.
-    INC_PROFILE_OCCURENCE(syscall_use_ipc);
     struct shim_thread * self = get_cur_thread();
     assert(self);
     int * set_parent_tid = NULL;
     int ret = 0;
 
-    /* special case for vfork. some runtime uses clone() for vfork */
-    if (flags == (CLONE_VFORK | CLONE_VM | SIGCHLD) &&
-        user_stack_addr == NULL && parent_tidptr == NULL &&
-        child_tidptr == NULL && tls == NULL) {
-        return shim_do_vfork();
+    /* special case of vfork: call shim_do_vfork() */
+    if (flags == (CLONE_VFORK | CLONE_VM | SIGCHLD)) {
+        /* some runtimes (e.g. Glibc 2.31+) specify user_stack_addr so that the child process
+         * must resume on this supplied stack; we mimic it by temporarily rewiring the current
+         * thread's stack values to the supplied user_stack_addr */
+        void* old_stack_top = self->stack_top;
+        void* old_stack_red = self->stack_red;
+        void* old_stack     = self->stack;
+        unsigned long old_stack_rsp = shim_context_get_sp(&self->shim_tcb->context);
+
+        if (user_stack_addr) {
+            struct shim_vma_info vma_info;
+            if (lookup_vma(ALLOC_ALIGN_DOWN_PTR(user_stack_addr), &vma_info) < 0) {
+                return -EFAULT;
+            }
+            self->stack_top = (char*)vma_info.addr + vma_info.length;
+            self->stack_red = vma_info.addr;
+            self->stack     = vma_info.addr;
+            shim_context_set_sp(&self->shim_tcb->context, (unsigned long)user_stack_addr);
+
+            if (vma_info.file) {
+                put_handle(vma_info.file);
+            }
+        }
+
+        /* FIXME: we ignore parent_tidptr, child_tidptr and tls; no application seems to use a
+         *        combination of clone(CLONE_VFORK) and these parameters */
+        if (flags & (CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|CLONE_SETTLS)) {
+            debug("Emulation of clone(CLONE_VFORK) takes into account only user_stack_addr = %p. "
+                  "Additional parameters are ignored:", user_stack_addr);
+            if (flags & CLONE_PARENT_SETTID)
+                debug(" parent_tidptr = %p", parent_tidptr);
+            if (flags & (CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID))
+                debug(" child_tidptr = %p", child_tidptr);
+            if (flags & CLONE_SETTLS)
+                debug(" tls = %p", tls);
+            debug("\n");
+        }
+
+        ret = shim_do_vfork();
+
+        /* parent process continues here, rewire stack values back to original ones */
+        if (user_stack_addr) {
+            self->stack_top = old_stack_top;
+            self->stack_red = old_stack_red;
+            self->stack     = old_stack;
+            shim_context_set_sp(&self->shim_tcb->context, old_stack_rsp);
+        }
+        return ret;
     }
 
     const int supported_flags =
@@ -265,6 +276,8 @@ int shim_do_clone (int flags, void * user_stack_addr, int * parent_tidptr,
         set_parent_tid = parent_tidptr;
     }
 
+    disable_preempt(NULL);
+
     struct shim_thread * thread = get_new_thread(0);
     if (!thread) {
         ret = -ENOMEM;
@@ -324,12 +337,19 @@ int shim_do_clone (int flags, void * user_stack_addr, int * parent_tidptr,
         thread->shim_tcb = &shim_tcb;
 
         if (user_stack_addr) {
-            struct shim_vma_val vma;
-            lookup_vma(ALLOC_ALIGN_DOWN_PTR(user_stack_addr), &vma);
-            thread->stack_top = vma.addr + vma.length;
-            thread->stack_red = thread->stack = vma.addr;
-            parent_stack = (void *)self->shim_tcb->context.regs->rsp;
-            thread->shim_tcb->context.regs->rsp = (unsigned long)user_stack_addr;
+            struct shim_vma_info vma_info;
+            if (lookup_vma(ALLOC_ALIGN_DOWN_PTR(user_stack_addr), &vma_info) < 0) {
+                ret = -EFAULT;
+                goto failed;
+            }
+            thread->stack_top = (char*)vma_info.addr + vma_info.length;
+            thread->stack_red = thread->stack = vma_info.addr;
+            parent_stack = (void*)shim_context_get_sp(&self->shim_tcb->context);
+            shim_context_set_sp(&thread->shim_tcb->context, (unsigned long)user_stack_addr);
+
+            if (vma_info.file) {
+                put_handle(vma_info.file);
+            }
         }
 
         thread->is_alive = true;
@@ -337,11 +357,12 @@ int shim_do_clone (int flags, void * user_stack_addr, int * parent_tidptr,
         add_thread(thread);
         set_as_child(self, thread);
 
-        ret = do_migrate_process(&migrate_fork, NULL, NULL, thread);
+        ret = create_process_and_send_checkpoint(&migrate_fork, /*exec=*/NULL, /*argv=*/NULL,
+                                                 thread);
         thread->shim_tcb = NULL; /* cpu context of forked thread isn't
                                   * needed any more */
         if (parent_stack)
-            self->shim_tcb->context.regs->rsp = (unsigned long)parent_stack;
+            shim_context_set_sp(&self->shim_tcb->context, (unsigned long)parent_stack);
         if (ret < 0)
             goto failed;
 
@@ -357,6 +378,7 @@ int shim_do_clone (int flags, void * user_stack_addr, int * parent_tidptr,
             *set_parent_tid = tid;
 
         put_thread(thread);
+        enable_preempt(NULL);
         return tid;
     }
 
@@ -367,13 +389,13 @@ int shim_do_clone (int flags, void * user_stack_addr, int * parent_tidptr,
 
     new_args.create_event = DkNotificationEventCreate(PAL_FALSE);
     if (!new_args.create_event) {
-        ret = -PAL_ERRNO;
+        ret = -PAL_ERRNO();
         goto clone_thread_failed;
     }
 
     new_args.initialize_event = DkNotificationEventCreate(PAL_FALSE);
     if (!new_args.initialize_event) {
-        ret = -PAL_ERRNO;
+        ret = -PAL_ERRNO();
         goto clone_thread_failed;
     }
 
@@ -394,7 +416,7 @@ int shim_do_clone (int flags, void * user_stack_addr, int * parent_tidptr,
     PAL_HANDLE pal_handle = thread_create(clone_implementation_wrapper,
                                           &new_args);
     if (!pal_handle) {
-        ret = -PAL_ERRNO;
+        ret = -PAL_ERRNO();
         put_thread(new_args.thread);
         goto clone_thread_failed;
     }
@@ -409,6 +431,7 @@ int shim_do_clone (int flags, void * user_stack_addr, int * parent_tidptr,
     object_wait_with_retry(new_args.initialize_event);
     DkObjectClose(new_args.initialize_event);
     put_thread(thread);
+    enable_preempt(NULL);
     return tid;
 
 clone_thread_failed:
@@ -419,5 +442,6 @@ clone_thread_failed:
 failed:
     if (thread)
         put_thread(thread);
+    enable_preempt(NULL);
     return ret;
 }

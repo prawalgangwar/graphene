@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -18,7 +19,7 @@
 enum { SINGLE, PARALLEL } mode = PARALLEL;
 int pipefds[2];
 
-void server(void) {
+static void server(void) {
     int listening_socket, client_socket;
     struct sockaddr_in address;
     socklen_t addrlen;
@@ -127,7 +128,7 @@ static ssize_t client_recv(int server_socket, char* buf, size_t len, int flags) 
     return read;
 }
 
-void client(void) {
+static void client(void) {
     int server_socket;
     struct sockaddr_in address;
     char buffer[BUFLEN];
@@ -204,7 +205,10 @@ int main(int argc, char** argv) {
             return 0;
         }
     } else {
-        pipe(pipefds);
+        if (pipe(pipefds) < 0) {
+            perror("pipe error");
+            return 1;
+        }
 
         int pid = fork();
 

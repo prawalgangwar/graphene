@@ -18,7 +18,7 @@ void * enclave_base, * enclave_top;
 
 struct pal_enclave_config pal_enclave_config;
 
-static int register_trusted_file (const char * uri, const char * checksum_str);
+static int register_trusted_file(const char* uri, const char* checksum_str, bool check_duplicates);
 
 bool sgx_is_completely_within_enclave (const void * addr, uint64_t size)
 {
@@ -37,13 +37,30 @@ bool sgx_is_completely_outside_enclave(const void* addr, uint64_t size) {
     return enclave_base >= addr + size || enclave_top <= addr;
 }
 
-void* sgx_alloc_on_ustack(uint64_t size) {
+void* sgx_prepare_ustack(void) {
+    void* old_ustack = GET_ENCLAVE_TLS(ustack);
+
+    void* ustack = old_ustack;
+    if (ustack != GET_ENCLAVE_TLS(ustack_top))
+        ustack -= RED_ZONE_SIZE;
+    SET_ENCLAVE_TLS(ustack, ustack);
+
+    return old_ustack;
+}
+
+void* sgx_alloc_on_ustack_aligned(uint64_t size, size_t alignment) {
+    assert(IS_POWER_OF_2(alignment));
     void* ustack = GET_ENCLAVE_TLS(ustack) - size;
+    ustack = ALIGN_DOWN_PTR_POW2(ustack, alignment);
     if (!sgx_is_completely_outside_enclave(ustack, size)) {
         return NULL;
     }
     SET_ENCLAVE_TLS(ustack, ustack);
     return ustack;
+}
+
+void* sgx_alloc_on_ustack(uint64_t size) {
+    return sgx_alloc_on_ustack_aligned(size, 1);
 }
 
 void* sgx_copy_to_ustack(const void* ptr, uint64_t size) {
@@ -57,8 +74,9 @@ void* sgx_copy_to_ustack(const void* ptr, uint64_t size) {
     return uptr;
 }
 
-void sgx_reset_ustack(void) {
-    SET_ENCLAVE_TLS(ustack, GET_ENCLAVE_TLS(ustack_top));
+void sgx_reset_ustack(const void* old_ustack) {
+    assert(old_ustack <= GET_ENCLAVE_TLS(ustack_top));
+    SET_ENCLAVE_TLS(ustack, old_ustack);
 }
 
 /* NOTE: Value from possibly untrusted uptr must be copied inside
@@ -104,14 +122,8 @@ static void print_report(sgx_report_t* r) {
 
 static sgx_key_128bit_t enclave_key;
 
-/*
- * sgx_get_report() obtains a CPU-signed report for local attestation
- * @target_info:  the enclave target info
- * @data:         the data to be included and signed in the report
- * @report:       a buffer for storing the report
- */
-static int sgx_get_report(sgx_target_info_t* target_info, sgx_sign_data_t* data,
-                          sgx_report_t* report) {
+static int __sgx_get_report(sgx_target_info_t* target_info, sgx_sign_data_t* data,
+                            sgx_report_t* report) {
     __sgx_mem_aligned struct pal_enclave_state state;
     memcpy(&state, &pal_enclave_state, sizeof(state));
     memcpy(&state.enclave_data, data, sizeof(*data));
@@ -123,6 +135,16 @@ static int sgx_get_report(sgx_target_info_t* target_info, sgx_sign_data_t* data,
     }
 
     print_report(report);
+    return 0;
+}
+
+int sgx_get_report(const sgx_target_info_t* target_info, const sgx_report_data_t* data,
+                   sgx_report_t* report) {
+    int ret = sgx_report(target_info, data, report);
+    if (ret) {
+        SGX_DBG(DBG_E, "sgx_report failed: ret = %d\n", ret);
+        return -PAL_ERROR_DENIED;
+    }
     return 0;
 }
 
@@ -209,10 +231,10 @@ int init_enclave_key (void)
 DEFINE_LIST(trusted_file);
 struct trusted_file {
     LIST_TYPE(trusted_file) list;
-    int64_t index;
     uint64_t size;
     size_t uri_len;
     char uri[URI_MAX];
+    bool allowed;
     sgx_checksum_t checksum;
     sgx_stub_t * stubs;
 };
@@ -220,7 +242,6 @@ struct trusted_file {
 DEFINE_LISTP(trusted_file);
 static LISTP_TYPE(trusted_file) trusted_file_list = LISTP_INIT;
 static spinlock_t trusted_file_lock = INIT_SPINLOCK_UNLOCKED;
-static int trusted_file_indexes = 0;
 static bool allow_file_creation = 0;
 static int file_check_policy = FILE_CHECK_POLICY_STRICT;
 
@@ -259,8 +280,12 @@ static bool path_is_equal_or_subpath(const struct trusted_file* tf,
  * Returns 0 if succeeded, or an error code otherwise.
  */
 int load_trusted_file (PAL_HANDLE file, sgx_stub_t ** stubptr,
-                       uint64_t * sizeptr, int create)
+                       uint64_t * sizeptr, int create, void** umem)
 {
+    *stubptr = NULL;
+    *sizeptr = 0;
+    *umem = NULL;
+
     struct trusted_file * tf = NULL, * tmp;
     char uri[URI_MAX];
     char normpath[URI_MAX];
@@ -277,9 +302,7 @@ int load_trusted_file (PAL_HANDLE file, sgx_stub_t ** stubptr,
     /* Allow to create the file when allow_file_creation is turned on;
        The created file is added to allowed_file list for later access */
     if (create && allow_file_creation) {
-       register_trusted_file(uri, NULL);
-       *stubptr = NULL;
-       *sizeptr = 0;
+       register_trusted_file(uri, NULL, /*check_duplicates=*/true);
        return 0;
     }
 
@@ -288,7 +311,7 @@ int load_trusted_file (PAL_HANDLE file, sgx_stub_t ** stubptr,
         SGX_DBG(DBG_E, "Invalid URI [%s]: Trusted files must start with 'file:'\n", uri);
         return -PAL_ERROR_INVAL;
     }
-    assert(sizeof(normpath) > URI_PREFIX_FILE_LEN);
+    static_assert(sizeof(normpath) > URI_PREFIX_FILE_LEN, "`normpath` is too small");
     memcpy(normpath, URI_PREFIX_FILE, URI_PREFIX_FILE_LEN);
     size_t len = sizeof(normpath) - URI_PREFIX_FILE_LEN;
     ret = get_norm_path(uri + URI_PREFIX_FILE_LEN, normpath + URI_PREFIX_FILE_LEN, &len);
@@ -321,7 +344,7 @@ int load_trusted_file (PAL_HANDLE file, sgx_stub_t ** stubptr,
 
     spinlock_unlock(&trusted_file_lock);
 
-    if (!tf || !tf->index) {
+    if (!tf || tf->allowed) {
         if (!tf) {
             if (get_file_check_policy() != FILE_CHECK_POLICY_ALLOW_ALL_BUT_LOG)
                 return -PAL_ERROR_DENIED;
@@ -341,28 +364,39 @@ int load_trusted_file (PAL_HANDLE file, sgx_stub_t ** stubptr,
         return 0;
     }
 
-    if (tf->index < 0)
-        return tf->index;
+    sgx_stub_t* stubs = NULL;
+    /* mmap the whole trusted file in untrusted memory for future reads/writes; it is
+     * caller's responsibility to unmap those areas after use */
+    *sizeptr = tf->size;
+    if (*sizeptr) {
+        ret = ocall_mmap_untrusted(fd, 0, tf->size, PROT_READ, umem);
+        if (IS_ERR(ret)) {
+            *umem = NULL;
+            ret = unix_to_pal_error(ERRNO(ret));
+            goto failed;
+        }
+    }
 
-#if CACHE_FILE_STUBS == 1
+    spinlock_lock(&trusted_file_lock);
     if (tf->stubs) {
         *stubptr = tf->stubs;
-        *sizeptr = tf->size;
+        spinlock_unlock(&trusted_file_lock);
         return 0;
     }
-#endif
+    spinlock_unlock(&trusted_file_lock);
 
     int nstubs = tf->size / TRUSTED_STUB_SIZE +
                 (tf->size % TRUSTED_STUB_SIZE ? 1 : 0);
 
-    sgx_stub_t * stubs = malloc(sizeof(sgx_stub_t) * nstubs);
-    if (!stubs)
-        return -PAL_ERROR_NOMEM;
+    stubs = malloc(sizeof(sgx_stub_t) * nstubs);
+    if (!stubs) {
+        ret = -PAL_ERROR_NOMEM;
+        goto failed;
+    }
 
     sgx_stub_t * s = stubs; /* stubs is an array of 128bit values */
     uint64_t offset = 0;
     LIB_SHA256_CONTEXT sha;
-    void * umem;
 
     ret = lib_SHA256Init(&sha);
     if (ret < 0)
@@ -376,12 +410,6 @@ int load_trusted_file (PAL_HANDLE file, sgx_stub_t ** stubptr,
         ret = lib_AESCMACInit(&aes_cmac, (uint8_t*)&enclave_key, sizeof(enclave_key));
         if (ret < 0)
             goto failed;
-
-        ret = ocall_mmap_untrusted(fd, offset, mapping_size, PROT_READ, &umem);
-        if (IS_ERR(ret)) {
-            ret = unix_to_pal_error(ERRNO(ret));
-            goto unmap;
-        }
 
         /*
          * To prevent TOCTOU attack when generating the file checksum, we
@@ -400,23 +428,21 @@ int load_trusted_file (PAL_HANDLE file, sgx_stub_t ** stubptr,
 
             /* Any file content needs to be copied into the enclave before
              * checking and re-hashing */
-            memcpy(small_chunk, umem + chunk_offset, chunk_size);
+            memcpy(small_chunk, *umem + offset + chunk_offset, chunk_size);
 
             /* Update the file checksum */
             ret = lib_SHA256Update(&sha, small_chunk, chunk_size);
             if (ret < 0)
-                goto unmap;
+                goto failed;
 
             /* Update the checksum for the file chunk */
             ret = lib_AESCMACUpdate(&aes_cmac, small_chunk, chunk_size);
             if (ret < 0)
-                goto unmap;
+                goto failed;
         }
 
         /* Store the checksum for one file chunk for checking */
         ret = lib_AESCMACFinish(&aes_cmac, (uint8_t *) s, sizeof *s);
-unmap:
-        ocall_munmap_untrusted(umem, mapping_size);
         if (ret < 0)
             goto failed;
     }
@@ -436,41 +462,27 @@ unmap:
     }
 
     spinlock_lock(&trusted_file_lock);
-    if (tf->stubs || tf->index == -PAL_ERROR_DENIED)
-        free(tf->stubs);
-    *stubptr = tf->stubs = stubs;
-    *sizeptr = tf->size;
-    ret = tf->index;
-    spinlock_unlock(&trusted_file_lock);
-    return ret;
-
-failed:
-    free(stubs);
-
-    spinlock_lock(&trusted_file_lock);
     if (tf->stubs) {
         *stubptr = tf->stubs;
-        *sizeptr = tf->size;
-        ret = tf->index;
-    } else {
-        tf->index = -PAL_ERROR_DENIED;
+        spinlock_unlock(&trusted_file_lock);
+        free(stubs);
+        return 0;
     }
+    *stubptr = tf->stubs = stubs;
     spinlock_unlock(&trusted_file_lock);
+    return 0;
 
-#if PRINT_ENCLAVE_STAT
-    if (!ret) {
-        sgx_stub_t * loaded_stub;
-        uint64_t loaded_size;
-        PAL_HANDLE handle = NULL;
-        if (!_DkStreamOpen(&handle, normpath, PAL_ACCESS_RDONLY, 0, 0, 0))
-            load_trusted_file (handle, &loaded_stub, &loaded_size);
+failed:
+    if (*umem) {
+        assert(*sizeptr > 0);
+        ocall_munmap_untrusted(*umem, *sizeptr);
     }
-#endif
+    free(stubs);
 
     return ret;
 }
 
-int get_file_check_policy ()
+int get_file_check_policy(void)
 {
     return file_check_policy;
 }
@@ -619,21 +631,24 @@ failed:
     return -PAL_ERROR_DENIED;
 }
 
-static int register_trusted_file (const char * uri, const char * checksum_str)
-{
+static int register_trusted_file(const char* uri, const char* checksum_str, bool check_duplicates) {
     struct trusted_file * tf = NULL, * new;
     size_t uri_len = strlen(uri);
     int ret;
 
-    spinlock_lock(&trusted_file_lock);
-
-    LISTP_FOR_EACH_ENTRY(tf, &trusted_file_list, list) {
-        if (tf->uri_len == uri_len && !memcmp(tf->uri, uri, uri_len)) {
-            spinlock_unlock(&trusted_file_lock);
-            return 0;
+    if (check_duplicates) {
+        /* this check is only done during runtime (when creating a new file) and not needed during
+         * initialization (because manifest is assumed to have no duplicates); skipping this check
+         * significantly improves startup time */
+        spinlock_lock(&trusted_file_lock);
+        LISTP_FOR_EACH_ENTRY(tf, &trusted_file_list, list) {
+            if (tf->uri_len == uri_len && !memcmp(tf->uri, uri, uri_len)) {
+                spinlock_unlock(&trusted_file_lock);
+                return 0;
+            }
         }
+        spinlock_unlock(&trusted_file_lock);
     }
-    spinlock_unlock(&trusted_file_lock);
 
     new = malloc(sizeof(struct trusted_file));
     if (!new)
@@ -644,6 +659,7 @@ static int register_trusted_file (const char * uri, const char * checksum_str)
     memcpy(new->uri, uri, uri_len + 1);
     new->size = 0;
     new->stubs = NULL;
+    new->allowed = false;
 
     if (checksum_str) {
         PAL_STREAM_ATTR attr;
@@ -689,27 +705,31 @@ static int register_trusted_file (const char * uri, const char * checksum_str)
             return -PAL_ERROR_INVAL;
         }
 
-        new->index = (++trusted_file_indexes);
-        SGX_DBG(DBG_S, "trusted: [%ld] %s %s\n", new->index,
+        SGX_DBG(DBG_S, "trusted: %s %s\n",
                 checksum_text, new->uri);
     } else {
         memset(&new->checksum, 0, sizeof(sgx_checksum_t));
-        new->index = 0;
+        new->allowed = true;
         SGX_DBG(DBG_S, "allowed: %s\n", new->uri);
     }
 
     spinlock_lock(&trusted_file_lock);
 
-    LISTP_FOR_EACH_ENTRY(tf, &trusted_file_list, list) {
-        if (tf->uri_len == uri_len && !memcmp(tf->uri, uri, uri_len)) {
-            spinlock_unlock(&trusted_file_lock);
-            free(new);
-            return 0;
+    if (check_duplicates) {
+        /* this check is only done during runtime and not needed during initialization (see above);
+         * we check again because same file could have been added by another thread in meantime */
+        LISTP_FOR_EACH_ENTRY(tf, &trusted_file_list, list) {
+            if (tf->uri_len == uri_len && !memcmp(tf->uri, uri, uri_len)) {
+                spinlock_unlock(&trusted_file_lock);
+                free(new);
+                return 0;
+            }
         }
     }
 
     LISTP_ADD_TAIL(new, &trusted_file_list, list);
     spinlock_unlock(&trusted_file_lock);
+
     return 0;
 }
 
@@ -731,7 +751,7 @@ static int init_trusted_file (const char * key, const char * uri)
         SGX_DBG(DBG_E, "Invalid URI [%s]: Trusted files must start with 'file:'\n", uri);
         return -PAL_ERROR_INVAL;
     }
-    assert(sizeof(normpath) > URI_PREFIX_FILE_LEN);
+    static_assert(sizeof(normpath) > URI_PREFIX_FILE_LEN, "`normpath` is too small");
     memcpy(normpath, URI_PREFIX_FILE, URI_PREFIX_FILE_LEN);
     size_t len = sizeof(normpath) - URI_PREFIX_FILE_LEN;
     ret = get_norm_path(uri + URI_PREFIX_FILE_LEN, normpath + URI_PREFIX_FILE_LEN, &len);
@@ -743,7 +763,7 @@ static int init_trusted_file (const char * key, const char * uri)
         return ret;
     }
 
-    return register_trusted_file(normpath, checksum);
+    return register_trusted_file(normpath, checksum, /*check_duplicates=*/false);
 }
 
 int init_trusted_files (void) {
@@ -859,7 +879,7 @@ no_trusted:
             ret = -PAL_ERROR_INVAL;
             goto out;
         }
-        assert(sizeof(norm_path) > URI_PREFIX_FILE_LEN);
+        static_assert(sizeof(norm_path) > URI_PREFIX_FILE_LEN, "`normpath` is too small");
         memcpy(norm_path, URI_PREFIX_FILE, URI_PREFIX_FILE_LEN);
 
         size_t norm_path_len = sizeof(norm_path) - URI_PREFIX_FILE_LEN;
@@ -875,7 +895,7 @@ no_trusted:
             goto out;
         }
 
-        register_trusted_file(norm_path, NULL);
+        register_trusted_file(norm_path, NULL, /*check_duplicates=*/false);
     }
 
 no_allowed:
@@ -963,8 +983,9 @@ int init_enclave (void)
     __sgx_mem_aligned struct pal_enclave_state reportdata = {0};
     __sgx_mem_aligned sgx_report_t report;
 
-    assert(sizeof(reportdata) == sizeof(sgx_report_data_t));
-    int ret = sgx_report(&targetinfo, (sgx_report_data_t*)&reportdata, &report);
+    static_assert(sizeof(reportdata) == sizeof(sgx_report_data_t),
+                  "incompatible `reportdata` size");
+    int ret = sgx_report(&targetinfo, &reportdata, &report);
     if (ret) {
         SGX_DBG(DBG_E, "failed to get self report: %d\n", ret);
         return -PAL_ERROR_INVAL;
@@ -1153,7 +1174,7 @@ int _DkStreamReportRequest(PAL_HANDLE stream, sgx_sign_data_t* data,
     memcpy(&target_info.mr_enclave , &report.body.mr_enclave,  sizeof(sgx_measurement_t));
     memcpy(&target_info.attributes, &report.body.attributes, sizeof(sgx_attributes_t));
 
-    ret = sgx_get_report(&target_info, data, &report);
+    ret = __sgx_get_report(&target_info, data, &report);
     if (ret < 0) {
         SGX_DBG(DBG_E, "Failed to get local report from CPU: %ld\n", ret);
         goto out;
@@ -1209,7 +1230,7 @@ int _DkStreamReportRespond(PAL_HANDLE stream, sgx_sign_data_t* data,
     }
 
     /* B -> A: report[B -> A] */
-    ret = sgx_get_report(&target_info, data, &report);
+    ret = __sgx_get_report(&target_info, data, &report);
     if (ret < 0) {
         SGX_DBG(DBG_E, "Failed to get local report from CPU: %ld\n", ret);
         goto out;
@@ -1275,11 +1296,14 @@ out:
 }
 
 int _DkStreamSecureInit(PAL_HANDLE stream, bool is_server, PAL_SESSION_KEY* session_key,
-                        LIB_SSL_CONTEXT** out_ssl_ctx) {
+                        LIB_SSL_CONTEXT** out_ssl_ctx, const uint8_t* buf_load_ssl_ctx,
+                        size_t buf_size) {
     int stream_fd;
 
     if (IS_HANDLE_TYPE(stream, process))
         stream_fd = stream->process.stream;
+    else if (IS_HANDLE_TYPE(stream, pipe) || IS_HANDLE_TYPE(stream, pipecli))
+        stream_fd = stream->pipe.fd;
     else
         return -PAL_ERROR_BADHANDLE;
 
@@ -1288,13 +1312,27 @@ int _DkStreamSecureInit(PAL_HANDLE stream, bool is_server, PAL_SESSION_KEY* sess
     if (!ssl_ctx)
         return -PAL_ERROR_NOMEM;
 
+    /* mbedTLS init routines are not thread safe, so we use a spinlock to protect them */
+    static spinlock_t ssl_init_lock = INIT_SPINLOCK_UNLOCKED;
+
+    spinlock_lock(&ssl_init_lock);
     int ret = lib_SSLInit(ssl_ctx, stream_fd, is_server,
                           (const uint8_t*)session_key, sizeof(*session_key),
-                          ocall_read, ocall_write);
+                          ocall_read, ocall_write, buf_load_ssl_ctx, buf_size);
+    spinlock_unlock(&ssl_init_lock);
 
     if (ret != 0) {
         free(ssl_ctx);
         return ret;
+    }
+
+    if (!buf_load_ssl_ctx) {
+        /* TLS context was not restored from the buffer, need to perform handshake */
+        ret = lib_SSLHandshake(ssl_ctx);
+        if (ret != 0) {
+            free(ssl_ctx);
+            return ret;
+        }
     }
 
     *out_ssl_ctx = ssl_ctx;
@@ -1313,4 +1351,32 @@ int _DkStreamSecureRead(LIB_SSL_CONTEXT* ssl_ctx, uint8_t* buf, size_t len) {
 
 int _DkStreamSecureWrite(LIB_SSL_CONTEXT* ssl_ctx, const uint8_t* buf, size_t len) {
     return lib_SSLWrite(ssl_ctx, buf, len);
+}
+
+int _DkStreamSecureSave(LIB_SSL_CONTEXT* ssl_ctx, const uint8_t** obuf, size_t* olen) {
+    assert(obuf);
+    assert(olen);
+
+    int ret;
+
+    /* figure out the required buffer size */
+    ret = lib_SSLSave(ssl_ctx, NULL, 0, olen);
+    if (ret != 0 && ret != -PAL_ERROR_NOMEM)
+        return ret;
+
+    /* create the required buffer */
+    size_t len   = *olen;
+    uint8_t* buf = malloc(len);
+    if (!buf)
+        return -PAL_ERROR_NOMEM;
+
+    /* now have buffer with sufficient size to save serialized context */
+    ret = lib_SSLSave(ssl_ctx, buf, len, olen);
+    if (ret != 0 || len != *olen) {
+        free(buf);
+        return -PAL_ERROR_DENIED;
+    }
+
+    *obuf = buf;
+    return 0;
 }

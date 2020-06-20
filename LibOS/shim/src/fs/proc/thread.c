@@ -1,9 +1,12 @@
+#define __KERNEL__
+
 #include <asm/fcntl.h>
 #include <asm/mman.h>
-#include <asm/prctl.h>
 #include <asm/unistd.h>
 #include <errno.h>
 #include <linux/fcntl.h>
+#include <linux/stat.h>
+
 #include <pal.h>
 #include <pal_error.h>
 #include <shim_fs.h>
@@ -12,10 +15,6 @@
 #include <shim_table.h>
 #include <shim_thread.h>
 #include <shim_utils.h>
-
-// TODO: For some reason S_IF* macros are missing if this file is included before our headers. We
-// should investigate and fix this behavior.
-#include <linux/stat.h>
 
 static int parse_thread_name(const char* name, IDTYPE* pidptr, const char** next, size_t* next_len,
                              const char** nextnext) {
@@ -202,7 +201,7 @@ static int proc_thread_link_follow_link(const char* name, struct shim_qstr* link
     return find_thread_link(name, link, NULL, NULL);
 }
 
-static const struct proc_fs_ops fs_thread_link = {
+static const struct pseudo_fs_ops fs_thread_link = {
     .open        = &proc_thread_link_open,
     .mode        = &proc_thread_link_mode,
     .stat        = &proc_thread_link_stat,
@@ -325,7 +324,7 @@ static int proc_list_thread_each_fd(const char* name, struct shim_dirent** buf, 
     return err;
 }
 
-static const struct proc_nm_ops nm_thread_each_fd = {
+static const struct pseudo_name_ops nm_thread_each_fd = {
     .match_name = &proc_match_thread_each_fd,
     .list_name  = &proc_list_thread_each_fd,
 };
@@ -442,20 +441,21 @@ static int proc_thread_each_fd_follow_link(const char* name, struct shim_qstr* l
     return find_thread_each_fd(name, link, NULL);
 }
 
-static const struct proc_fs_ops fs_thread_each_fd = {
+static const struct pseudo_fs_ops fs_thread_each_fd = {
     .open        = &proc_thread_each_fd_open,
     .mode        = &proc_thread_each_fd_mode,
     .stat        = &proc_thread_each_fd_stat,
     .follow_link = &proc_thread_each_fd_follow_link,
 };
 
-static const struct proc_dir dir_fd = {
+static const struct pseudo_dir dir_fd = {
     .size = 1,
     .ent =
         {
             {
-                .nm_ops = &nm_thread_each_fd,
-                .fs_ops = &fs_thread_each_fd,
+                .name_ops = &nm_thread_each_fd,
+                .fs_ops   = &fs_thread_each_fd,
+                .type     = LINUX_DT_LNK,
             },
         },
 };
@@ -477,35 +477,15 @@ static int proc_thread_maps_open(struct shim_handle* hdl, const char* name, int 
     if (!thread)
         return -ENOENT;
 
-    size_t count              = DEFAULT_VMA_COUNT;
-    struct shim_vma_val* vmas = malloc(sizeof(struct shim_vma_val) * count);
-
-    if (!vmas) {
-        ret = -ENOMEM;
-        goto out;
-    }
-
-retry_dump_vmas:
-    ret = dump_all_vmas(vmas, count);
-
-    if (ret == -EOVERFLOW) {
-        struct shim_vma_val* new_vmas = malloc(sizeof(struct shim_vma_val) * count * 2);
-        if (!new_vmas) {
-            ret = -ENOMEM;
-            goto err;
-        }
-        free(vmas);
-        vmas = new_vmas;
-        count *= 2;
-        goto retry_dump_vmas;
-    }
-
-    if (ret < 0)
+    size_t count;
+    struct shim_vma_info* vmas = NULL;
+    ret = dump_all_vmas(&vmas, &count, /*include_unmapped=*/false);
+    if (ret < 0) {
         goto err;
+    }
 
 #define DEFAULT_VMA_BUFFER_SIZE 256
 
-    count              = ret;
     size_t buffer_size = DEFAULT_VMA_BUFFER_SIZE, offset = 0;
     buffer = malloc(buffer_size);
     if (!buffer) {
@@ -513,7 +493,7 @@ retry_dump_vmas:
         goto err;
     }
 
-    for (struct shim_vma_val* vma = vmas; vma < vmas + count; vma++) {
+    for (struct shim_vma_info* vma = vmas; vma < vmas + count; vma++) {
         size_t old_offset = offset;
         uintptr_t start   = (uintptr_t)vma->addr;
         uintptr_t end     = (uintptr_t)vma->addr + vma->length;
@@ -542,7 +522,7 @@ retry_dump_vmas:
             EMIT(ADDR_FMT(start), start);
             EMIT("-");
             EMIT(ADDR_FMT(end), end);
-            EMIT(" %c%c%c%c %08lx %02d:%02d %lu %s\n", pt[0], pt[1], pt[2], pr, vma->offset,
+            EMIT(" %c%c%c%c %08lx %02d:%02d %lu %s\n", pt[0], pt[1], pt[2], pr, vma->file_offset,
                  dev_major, dev_minor, ino, name);
         } else {
             EMIT(ADDR_FMT(start), start);
@@ -583,16 +563,16 @@ retry_dump_vmas:
     hdl->acc_mode      = MAY_READ;
     hdl->info.str.data = data;
     ret                = 0;
-out:
-    put_thread(thread);
-    if (vmas)
-        free_vma_val_array(vmas, count);
-    return ret;
 
 err:
-    if (buffer)
+    if (ret < 0) {
         free(buffer);
-    goto out;
+    }
+    if (vmas) {
+        free_vma_info_array(vmas, count);
+    }
+    put_thread(thread);
+    return ret;
 }
 
 static int proc_thread_maps_mode(const char* name, mode_t* mode) {
@@ -616,7 +596,7 @@ static int proc_thread_maps_stat(const char* name, struct stat* buf) {
     return 0;
 }
 
-static const struct proc_fs_ops fs_thread_maps = {
+static const struct pseudo_fs_ops fs_thread_maps = {
     .open = &proc_thread_maps_open,
     .mode = &proc_thread_maps_mode,
     .stat = &proc_thread_maps_stat,
@@ -673,7 +653,7 @@ static int proc_thread_dir_stat(const char* name, struct stat* buf) {
     return 0;
 }
 
-static const struct proc_fs_ops fs_thread_fd = {
+static const struct pseudo_fs_ops fs_thread_fd = {
     .mode = &proc_thread_dir_mode,
     .stat = &proc_thread_dir_stat,
 };
@@ -697,9 +677,7 @@ struct walk_thread_arg {
     struct shim_dirent *buf, *buf_end;
 };
 
-static int walk_cb(struct shim_thread* thread, void* arg, bool* unlocked) {
-    // unlocked needed for kill
-    __UNUSED(unlocked);
+static int walk_cb(struct shim_thread* thread, void* arg) {
     struct walk_thread_arg* args = (struct walk_thread_arg*)arg;
     IDTYPE pid                   = thread->tid;
     int p = pid, l = 0;
@@ -707,7 +685,7 @@ static int walk_cb(struct shim_thread* thread, void* arg, bool* unlocked) {
         ;
 
     if ((void*)(args->buf + 1) + l + 1 > (void*)args->buf_end)
-        return -ENOBUFS;
+        return -ENOMEM;
 
     struct shim_dirent* buf = args->buf;
 
@@ -730,7 +708,7 @@ static int proc_list_thread(const char* name, struct shim_dirent** buf, int len)
         .buf_end = (void*)*buf + len,
     };
 
-    int ret = walk_thread_list(&walk_cb, &args);
+    int ret = walk_thread_list(&walk_cb, &args, /*one_shot=*/false);
     if (ret < 0)
         return ret;
 
@@ -738,41 +716,34 @@ static int proc_list_thread(const char* name, struct shim_dirent** buf, int len)
     return 0;
 }
 
-const struct proc_nm_ops nm_thread = {
+const struct pseudo_name_ops nm_thread = {
     .match_name = &proc_match_thread,
     .list_name  = &proc_list_thread,
 };
 
-const struct proc_fs_ops fs_thread = {
+const struct pseudo_fs_ops fs_thread = {
     .open = &proc_thread_dir_open,
     .mode = &proc_thread_dir_mode,
     .stat = &proc_thread_dir_stat,
 };
 
-const struct proc_dir dir_thread = {
+const struct pseudo_dir dir_thread = {
     .size = 5,
-    .ent =
-        {
-            {
-                .name   = "cwd",
+    .ent  = {
+              { .name   = "cwd",
                 .fs_ops = &fs_thread_link,
-            },
-            {
-                .name   = "exe",
+                .type   = LINUX_DT_LNK },
+              { .name   = "exe",
                 .fs_ops = &fs_thread_link,
-            },
-            {
-                .name   = "root",
+                .type   = LINUX_DT_LNK },
+              { .name   = "root",
                 .fs_ops = &fs_thread_link,
-            },
-            {
-                .name   = "fd",
-                .dir    = &dir_fd,
+                .type   = LINUX_DT_LNK },
+              { .name   = "fd",
                 .fs_ops = &fs_thread_fd,
-            },
-            {
-                .name   = "maps",
+                .dir    = &dir_fd },
+              { .name   = "maps",
                 .fs_ops = &fs_thread_maps,
-            },
-        },
+                .type   = LINUX_DT_REG },
+        }
 };

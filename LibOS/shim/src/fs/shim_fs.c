@@ -1,18 +1,5 @@
-/* Copyright (C) 2014 Stony Brook University
-   This file is part of Graphene Library OS.
-
-   Graphene Library OS is free software: you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public License
-   as published by the Free Software Foundation, either version 3 of the
-   License, or (at your option) any later version.
-
-   Graphene Library OS is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
+/* Copyright (C) 2014 Stony Brook University */
 
 /*
  * shim_fs.c
@@ -37,9 +24,7 @@ struct shim_fs {
     struct shim_d_ops* d_ops;
 };
 
-#define NUM_MOUNTABLE_FS 3
-
-struct shim_fs mountable_fs[NUM_MOUNTABLE_FS] = {
+struct shim_fs mountable_fs[] = {
     {
         .name   = "chroot",
         .fs_ops = &chroot_fs_ops,
@@ -57,11 +42,10 @@ struct shim_fs mountable_fs[NUM_MOUNTABLE_FS] = {
     },
 };
 
-#define NUM_BUILTIN_FS 5
-
-struct shim_mount* builtin_fs[NUM_BUILTIN_FS] = {
+struct shim_mount* builtin_fs[] = {
     &chroot_builtin_fs,
     &pipe_builtin_fs,
+    &fifo_builtin_fs,
     &socket_builtin_fs,
     &epoll_builtin_fs,
     &eventfd_builtin_fs,
@@ -259,7 +243,7 @@ static inline struct shim_fs* find_fs(const char* type) {
     struct shim_fs* fs = NULL;
     size_t len = strlen(type);
 
-    for (int i = 0; i < NUM_MOUNTABLE_FS; i++)
+    for (size_t i = 0; i < ARRAY_SIZE(mountable_fs); i++)
         if (!memcmp(type, mountable_fs[i].name, len + 1)) {
             fs = &mountable_fs[i];
             break;
@@ -271,7 +255,7 @@ static inline struct shim_fs* find_fs(const char* type) {
 int search_builtin_fs(const char* type, struct shim_mount** fs) {
     size_t len = strlen(type);
 
-    for (int i = 0; i < NUM_BUILTIN_FS; i++)
+    for (size_t i = 0; i < ARRAY_SIZE(builtin_fs); i++)
         if (!memcmp(type, builtin_fs[i]->type, len + 1)) {
             *fs = builtin_fs[i];
             return 0;
@@ -280,7 +264,7 @@ int search_builtin_fs(const char* type, struct shim_mount** fs) {
     return -ENOENT;
 }
 
-int __mount_fs(struct shim_mount* mount, struct shim_dentry* dent) {
+static int __mount_fs(struct shim_mount* mount, struct shim_dentry* dent) {
     assert(locked(&dcache_lock));
 
     int ret = 0;
@@ -536,7 +520,7 @@ struct shim_mount* find_mount_from_uri(const char* uri) {
         if (qstrempty(&mount->uri))
             continue;
 
-        if (!memcmp(qstrgetstr(&mount->uri), uri, mount->uri.len) && uri[mount->uri.len] == '/') {
+        if (!memcmp(qstrgetstr(&mount->uri), uri, mount->uri.len)) {
             if (mount->path.len > longest_path) {
                 longest_path = mount->path.len;
                 found = mount;
@@ -558,7 +542,7 @@ BEGIN_CP_FUNC(mount) {
     struct shim_mount* mount     = (struct shim_mount*)obj;
     struct shim_mount* new_mount = NULL;
 
-    ptr_t off = GET_FROM_CP_MAP(obj);
+    size_t off = GET_FROM_CP_MAP(obj);
 
     if (!off) {
         off = ADD_CP_OFFSET(sizeof(struct shim_mount));

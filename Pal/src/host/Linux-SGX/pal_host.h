@@ -1,18 +1,5 @@
-/* Copyright (C) 2014 Stony Brook University
-   This file is part of Graphene Library OS.
-
-   Graphene Library OS is free software: you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public License
-   as published by the Free Software Foundation, either version 3 of the
-   License, or (at your option) any later version.
-
-   Graphene Library OS is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
+/* Copyright (C) 2014 Stony Brook University */
 
 /*
  * pal_host.h
@@ -42,16 +29,14 @@ void free_untrusted (void * mem);
 
 #include <list.h>
 
-/* Simpler mutex design: a single variable that tracks whether the mutex
- * is locked (just waste a 64 bit word for now).  State is 1 (locked) or
- * 0 (unlocked).
- *
+/* Simpler mutex design: a single variable that tracks whether the
+ * mutex is locked.  State is 1 (locked) or 0 (unlocked).
  * Keep a count of how many threads are waiting on the mutex.
  *
- * If DEBUG_MUTEX is defined, mutex_handle will record the owner of
- * mutex locking. */
+ * If DEBUG_MUTEX is defined, mutex_handle will record the owner of mutex locking.
+ */
 struct mutex_handle {
-    volatile int64_t * locked;
+    uint32_t* locked;
     struct atomic_int nwaiters;
 #ifdef DEBUG_MUTEX
     int owner;
@@ -70,6 +55,10 @@ struct pal_handle_thread {
     LIST_TYPE(pal_handle_thread) list;
     void * param;
 };
+
+typedef struct {
+    char str[PIPE_NAME_MAX];
+} PAL_PIPE_NAME;
 
 /* RPC streams are encrypted with 256-bit AES keys */
 typedef uint8_t PAL_SESSION_KEY[32];
@@ -91,7 +80,6 @@ typedef struct pal_handle
             PAL_IDX fd;
             PAL_STR realpath;
             PAL_NUM total;
-            PAL_NUM offset;
             /* below fields are used only for trusted files */
             PAL_PTR stubs;    /* contains hashes of file chunks */
             PAL_PTR umem;     /* valid only when stubs != NULL */
@@ -99,8 +87,12 @@ typedef struct pal_handle
 
         struct {
             PAL_IDX fd;
-            PAL_NUM pipeid;
+            PAL_PIPE_NAME name;
             PAL_BOL nonblocking;
+            PAL_BOL is_server;
+            PAL_SESSION_KEY session_key;
+            PAL_NUM handshake_done;
+            void* ssl_ctx;
         } pipe;
 
         struct {
@@ -147,7 +139,6 @@ typedef struct pal_handle
 
         struct {
             PAL_IDX stream;
-            PAL_IDX cargo;
             PAL_IDX pid;
             PAL_BOL nonblocking;
             PAL_SESSION_KEY session_key;
@@ -164,7 +155,7 @@ typedef struct pal_handle
             } mutex;
 
             struct {
-                struct atomic_int * signaled;
+                uint32_t* signaled;
                 struct atomic_int nwaiters;
                 PAL_BOL isnotification;
             } event;

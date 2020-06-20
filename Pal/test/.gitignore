@@ -1,8 +1,0 @@
-*
-!.gitignore
-!*.c
-!*.cpp
-!*.py
-!*.sh
-!*.template
-!Makefile*

@@ -16,7 +16,6 @@
 struct shim_handle;
 struct shim_fd_map;
 struct shim_dentry;
-struct shim_signal_log;
 
 #define WAKE_QUEUE_TAIL ((void*)1)
 /* If next is NULL, then this node is not on any queue.
@@ -26,6 +25,26 @@ struct wake_queue_node {
 };
 struct wake_queue_head {
     struct wake_queue_node* first;
+};
+
+struct shim_signal_handles {
+    struct __kernel_sigaction actions[NUM_SIGS];
+    struct shim_lock lock;
+    REFTYPE ref_count;
+};
+
+/* For more info see: man signal(7) */
+#define MAX_SIGNAL_LOG 32
+
+struct shim_rt_signal_queue {
+    uint64_t put_idx;
+    uint64_t get_idx;
+    struct shim_signal* queue[MAX_SIGNAL_LOG];
+};
+
+struct shim_signal_queue {
+    struct shim_signal* standard_signals[SIGRTMIN - 1];
+    struct shim_rt_signal_queue rt_signal_queues[NUM_SIGS - SIGRTMIN + 1];
 };
 
 DEFINE_LIST(shim_thread);
@@ -47,10 +66,6 @@ struct shim_thread {
     struct shim_thread * parent;
     /* thread leader */
     struct shim_thread * leader;
-#ifndef ALIAS_VFORK_AS_FORK
-    /* dummy thread: stores blocked parent thread for vfork */
-    struct shim_thread * dummy;
-#endif
     /* child handles; protected by thread->lock */
     LISTP_TYPE(shim_thread) children;
     /* nodes in child handles; protected by the parent's lock */
@@ -67,10 +82,12 @@ struct shim_thread {
 
     /* signal handling */
     __sigset_t signal_mask;
-    struct shim_signal_handle signal_handles[NUM_SIGS];
-    struct atomic_int has_signal;
-    struct shim_signal_log * signal_logs;
-    bool suspend_on_signal;
+    struct shim_signal_handles* signal_handles;
+    struct shim_signal_queue signal_queue;
+    /* For the field below, see the explanation in "LibOS/shim/src/bookkeep/shim_signal.c" near
+     * `process_pending_signals_cnt`. */
+    uint64_t pending_signals;
+    bool signal_handled;
     stack_t signal_altstack;
 
     /* futex robust list */
@@ -85,6 +102,7 @@ struct shim_thread {
     int term_signal; // Store the terminating signal, if any; needed for
                      // wait() and friends
     bool is_alive;
+    bool time_to_die;
 
     PAL_HANDLE child_exit_event;
     LISTP_TYPE(shim_thread) exited_children;
@@ -102,33 +120,6 @@ struct shim_thread {
 
     REFTYPE ref_count;
     struct shim_lock lock;
-
-#ifdef PROFILE
-    unsigned long exit_time;
-#endif
-};
-
-DEFINE_LIST(shim_simple_thread);
-struct shim_simple_thread {
-    /* VMID and PIDs */
-    IDTYPE vmid;
-    IDTYPE pgid, tgid, tid;
-
-    /* exit event and status */
-    PAL_HANDLE exit_event;
-    int exit_code;
-    int term_signal;
-    bool is_alive;
-
-    /* nodes in global handles */
-    LIST_TYPE(shim_simple_thread) list;
-
-    REFTYPE ref_count;
-    struct shim_lock lock;
-
-#ifdef PROFILE
-    unsigned long exit_time;
-#endif
 };
 
 int init_thread (void);
@@ -138,10 +129,11 @@ static inline bool is_internal(struct shim_thread *thread)
     return thread->tid >= INTERNAL_TID_BASE;
 }
 
+void get_signal_handles(struct shim_signal_handles* handles);
+void put_signal_handles(struct shim_signal_handles* handles);
+
 void get_thread (struct shim_thread * thread);
 void put_thread (struct shim_thread * thread);
-void get_simple_thread (struct shim_simple_thread * thread);
-void put_simple_thread (struct shim_simple_thread * thread);
 
 void update_fs_base (unsigned long fs_base);
 
@@ -168,14 +160,6 @@ struct shim_thread* get_cur_thread (void) {
 
 static inline
 __attribute__((always_inline))
-bool cur_thread_is_alive (void)
-{
-    struct shim_thread * thread = get_cur_thread();
-    return thread ? thread->is_alive : false;
-}
-
-static inline
-__attribute__((always_inline))
 void set_cur_thread (struct shim_thread * thread)
 {
     shim_tcb_t * tcb = shim_get_tcb();
@@ -191,11 +175,6 @@ void set_cur_thread (struct shim_thread * thread)
         tcb->tp = thread;
         thread->shim_tcb = tcb;
         tid = thread->tid;
-
-        if (!is_internal(thread) && !thread->signal_logs) {
-            thread->signal_logs = signal_logs_alloc();
-            assert(thread->signal_logs); /* FIXME on ENOMEM */
-        }
     } else if (tcb->tp) {
         put_thread(tcb->tp);
         tcb->tp = NULL;
@@ -234,7 +213,7 @@ static inline int thread_sleep (uint64_t timeout_us)
         return -EINVAL;
 
     if (!DkSynchronizationObjectWait(event, timeout_us))
-        return -PAL_ERRNO;
+        return -PAL_ERRNO();
 
     return 0;
 }
@@ -251,7 +230,7 @@ static inline void thread_wakeup (struct shim_thread * thread)
  *
  * Returns 0 if the thread was added to the queue, 1 otherwise. */
 static inline int add_thread_to_queue(struct wake_queue_head* queue, struct shim_thread* thread) {
-    void* nptr = NULL;
+    struct wake_queue_node* nptr = NULL;
     struct wake_queue_node* qnode = &thread->wake_queue;
 
     /* Atomic cmpxchg is enough, no need to take thread->lock */
@@ -292,34 +271,24 @@ extern struct shim_lock thread_list_lock;
  * Increases refcount of the returned thread.
  */
 struct shim_thread* lookup_thread(IDTYPE tid);
-struct shim_simple_thread * __lookup_simple_thread (IDTYPE tid);
-struct shim_simple_thread * lookup_simple_thread (IDTYPE tid);
 
 void set_as_child (struct shim_thread * parent, struct shim_thread * child);
 
 /* creating and revoking thread objects */
 struct shim_thread * get_new_thread (IDTYPE new_tid);
 struct shim_thread * get_new_internal_thread (void);
-struct shim_simple_thread * get_new_simple_thread (void);
 
 /* thread list utilities */
 void add_thread (struct shim_thread * thread);
 void del_thread (struct shim_thread * thread);
-void add_simple_thread (struct shim_simple_thread * thread);
-void del_simple_thread (struct shim_simple_thread * thread);
 
 void cleanup_thread(IDTYPE caller, void* thread);
-int check_last_thread(struct shim_thread* self);
+bool mark_self_dead(void);
+bool check_last_thread(void);
 
-#ifndef ALIAS_VFORK_AS_FORK
-void switch_dummy_thread (struct shim_thread * thread);
-#endif
+int walk_thread_list(int (*callback)(struct shim_thread*, void*), void* arg, bool one_shot);
 
-int walk_thread_list (int (*callback) (struct shim_thread *, void *, bool *),
-                      void * arg);
-int walk_simple_thread_list (int (*callback) (struct shim_simple_thread *,
-                                              void *, bool *),
-                             void * arg);
+void dump_threads(void);
 
 /* reference counting of handle maps */
 void get_handle_map (struct shim_handle_map * map);
@@ -350,8 +319,10 @@ void set_handle_map (struct shim_thread * thread,
     thread->handle_map = map;
 }
 
-int thread_exit(struct shim_thread* self, bool send_ipc);
-noreturn void thread_or_process_exit(int error_code, int term_signal);
+int thread_destroy(struct shim_thread* self, bool send_ipc);
+bool kill_other_threads(void);
+noreturn void thread_exit(int error_code, int term_signal);
+noreturn void process_exit(int error_code, int term_signal);
 
 void release_robust_list(struct robust_list_head* head);
 

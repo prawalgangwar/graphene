@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <dirent.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -23,7 +24,7 @@ struct linux_dirent64 {
 
 #define BUF_SIZE 512
 
-int main() {
+int main(void) {
     int rv, fd, offs;
     const mode_t perm = S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH;
     char buf[BUF_SIZE];

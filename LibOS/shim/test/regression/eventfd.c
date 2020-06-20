@@ -32,7 +32,7 @@
 
 int efds[MAX_EFDS] = {0};
 
-void* write_eventfd_thread(void* arg) {
+static void* write_eventfd_thread(void* arg) {
     uint64_t count = 10;
 
     int* efds = (int*)arg;
@@ -50,7 +50,10 @@ void* write_eventfd_thread(void* arg) {
 
     for (int i = 0; i < MAX_EFDS; i++) {
         sleep(1);
-        write(efds[i], &count, sizeof(count));
+        if (write(efds[i], &count, sizeof(count)) != sizeof(count)) {
+            perror("write error");
+            return NULL;
+        }
         count += 1;
     }
 
@@ -59,7 +62,7 @@ void* write_eventfd_thread(void* arg) {
 
 /* This function used to test polling on a group of eventfd descriptors.
  * To support regression testing, positive value returned for error case. */
-int eventfd_using_poll() {
+static int eventfd_using_poll(void) {
     int ret = 0;
     struct pollfd pollfds[MAX_EFDS];
     pthread_t tid    = 0;
@@ -84,7 +87,7 @@ int eventfd_using_poll() {
     ret = pthread_create(&tid, NULL, write_eventfd_thread, efds);
 
     if (ret != 0) {
-        perror("error in thread creation\n");
+        perror("error in thread creation");
         ret = 1;
         goto out;
     }
@@ -107,7 +110,11 @@ int eventfd_using_poll() {
             if (pollfds[i].revents & POLLIN) {
                 pollfds[i].revents = 0;
                 errno              = 0;
-                read(pollfds[i].fd, &count, sizeof(count));
+                if (read(pollfds[i].fd, &count, sizeof(count)) != sizeof(count)) {
+                    perror("read error");
+                    ret = 1;
+                    goto out;
+                }
                 printf("fd set=%d\n", pollfds[i].fd);
                 printf("efd = %d, count: %lu, errno=%d\n", pollfds[i].fd, count, errno);
                 nread_events++;
@@ -133,7 +140,7 @@ out:
 /* This function used to test various flags supported while creating eventfd
  * descriptors.
  * To support regression testing, positive value returned for error case. */
-int eventfd_using_various_flags() {
+static int eventfd_using_various_flags(void) {
     uint64_t count      = 0;
     int efd             = 0;
     ssize_t bytes       = 0;
@@ -173,6 +180,7 @@ int eventfd_using_various_flags() {
                 close(efd);
                 return 1;
             }
+            close(efd);
             continue;
         }
 
@@ -189,7 +197,14 @@ int eventfd_using_various_flags() {
         if (eventfd_flags[i] & EFD_NONBLOCK) {
             count = 0;
             errno = 0;
-            read(efd, &count, sizeof(count));
+            ssize_t ret = read(efd, &count, sizeof(count));
+            if (ret != -1 || errno != EAGAIN) {
+                printf("read that should return -1 with EAGAIN returned: %ld with errno=%d\n",
+                       ret,
+                       errno);
+                close(efd);
+                return 1;
+            }
             printf("%d: efd = %d, count: %lu, errno=%d\n", __LINE__, efd, count, errno);
         }
 
@@ -201,7 +216,7 @@ int eventfd_using_various_flags() {
     return 0;
 }
 
-int eventfd_using_fork() {
+static int eventfd_using_fork(void) {
     int status     = 0;
     int efd        = 0;
     uint64_t count = 0;
@@ -218,7 +233,10 @@ int eventfd_using_fork() {
     if (pid == 0) {
         // child process
         count = 5;
-        write(efd, &count, sizeof(count));
+        if (write(efd, &count, sizeof(count)) != sizeof(count)) {
+            perror("write error");
+            exit(1);
+        }
         exit(0);
     } else if (pid > 0) {
         // parent process
@@ -230,7 +248,11 @@ int eventfd_using_fork() {
         }
 
         count = 0;
-        read(efd, &count, sizeof(count));
+        if (read(efd, &count, sizeof(count)) != sizeof(count)) {
+            perror("read error");
+            close(efd);
+            exit(1);
+        }
         if (count != 5) {
             printf("parent-pid=%d, efd = %d, count: %lu, errno=%d\n", getpid(), efd, count, errno);
             CLOSE_EFD_AND_EXIT(efd);
